@@ -661,6 +661,9 @@ export interface ConfigIssue {
 
 const VALID_TYPES: StepType[] = ['info', 'number', 'single-select', 'multi-select', 'result'];
 
+/** CTA actions the client knows how to perform. Kept in step with Funnel.tsx. */
+export const KNOWN_CTA_ACTIONS = ['expand_recommendation'];
+
 /**
  * Structural checks. A config with errors is refused at publish time, so a
  * broken version can never become active and strand live traffic.
@@ -703,6 +706,11 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
     if (step.type === 'number' && !step.input) {
       err(`step "${id}" needs an input block.`);
     }
+    // The engine only knows how to derive a result from `resultRules`; a config
+    // naming another source would silently fall through to the default result.
+    if (step.type === 'result' && step.resultSource && step.resultSource !== 'resultRules') {
+      err(`step "${id}" declares unsupported resultSource "${step.resultSource}".`);
+    }
     if (step.type === 'multi-select') {
       const { minSelections, maxSelections } = step.validation ?? {};
       if (minSelections !== undefined && maxSelections !== undefined && minSelections > maxSelections) {
@@ -726,6 +734,10 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
   for (const [id, result] of Object.entries(config.results ?? {})) {
     if (!result.cta?.label || !result.cta?.action) {
       err(`result "${id}" needs a cta with a label and an action.`);
+    } else if (!KNOWN_CTA_ACTIONS.includes(result.cta.action)) {
+      // A warning, not an error: the client falls back to revealing the
+      // recommendation, so an unknown action degrades rather than breaking.
+      warn(`result "${id}" uses cta action "${result.cta.action}", which the client does not implement.`);
     }
   }
 

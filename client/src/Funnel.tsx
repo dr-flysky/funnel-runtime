@@ -238,6 +238,20 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
   );
 }
 
+/**
+ * CTA behaviour is named by the config, not chosen by the client.
+ *
+ * `expand_recommendation` is what funnel-v1.json asks for on every result, so
+ * the action list is withheld until the CTA is pressed — that is what makes the
+ * click a real signal rather than a decorative one, and it is what the primary
+ * metric (cta_click_rate) is measuring.
+ *
+ * An action the client does not recognise still records the click and reveals
+ * whatever detail the result carries, so a future config naming a new action
+ * degrades to something sensible instead of a dead button.
+ */
+const KNOWN_CTA_ACTIONS = new Set(['expand_recommendation']);
+
 function ResultScreen({
   view,
   onRestart,
@@ -247,7 +261,13 @@ function ResultScreen({
   onRestart: () => void;
   onBack: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const result = view.result;
+
+  // A new result means a fresh, un-expanded screen.
+  useEffect(() => {
+    setExpanded(false);
+  }, [view.resultId, view.sessionId]);
 
   if (!result) {
     const step = view.funnel.steps.find((s) => s.type === 'result');
@@ -263,18 +283,40 @@ function ResultScreen({
     );
   }
 
+  const recommendations = result.recommendations ?? [];
+
+  const onCta = () => {
+    // Declared properties for cta_clicked: result_id, action.
+    tracker.track(view.sessionId, 'cta_clicked', view.currentStep, {
+      result_id: result.id,
+      action: result.cta.action,
+    });
+
+    if (!KNOWN_CTA_ACTIONS.has(result.cta.action)) {
+      console.warn(
+        `[funnel] unrecognised cta action "${result.cta.action}"; expanding the recommendation as a fallback.`,
+      );
+    }
+    setExpanded(true);
+  };
+
   return (
     <>
       <div className="result-badge">Your recommendation</div>
       <h1>{result.title}</h1>
       {result.summary && <p className="subtitle">{result.summary}</p>}
-      {result.recommendations && result.recommendations.length > 0 && (
-        <ul className="bullets">
-          {result.recommendations.map((r) => (
-            <li key={r}>{r}</li>
-          ))}
-        </ul>
+
+      {expanded && recommendations.length > 0 && (
+        <div className="action-list">
+          <h2>What to do next</h2>
+          <ol>
+            {recommendations.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ol>
+        </div>
       )}
+
       <div className="actions">
         {view.canGoBack && (
           <button type="button" className="btn ghost" onClick={onBack}>
@@ -284,19 +326,11 @@ function ResultScreen({
         <button type="button" className="btn ghost" onClick={onRestart}>
           Start again
         </button>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() =>
-            // Declared properties for cta_clicked: result_id, action.
-            tracker.track(view.sessionId, 'cta_clicked', view.currentStep, {
-              result_id: result.id,
-              action: result.cta.action,
-            })
-          }
-        >
-          {result.cta.label}
-        </button>
+        {!expanded && (
+          <button type="button" className="btn primary" onClick={onCta}>
+            {result.cta.label}
+          </button>
+        )}
       </div>
     </>
   );

@@ -314,6 +314,44 @@ h3 { font-size: 0.95rem; margin: 0 0 0.35rem; }
   margin-bottom: 0.75rem;
 }
 
+.action-list {
+  margin: 0 0 1.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  animation: reveal 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.action-list h2 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  margin: 0 0 0.6rem;
+}
+
+.action-list ol {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.action-list li {
+  margin-bottom: 0.45rem;
+}
+
+.action-list li:last-child {
+  margin-bottom: 0;
+}
+
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .action-list { animation: none; }
+}
+
 .footnote { text-align: center; color: var(--text-muted); font-size: 0.82rem; margin-top: 1.25rem; }
 
 .skeleton {

@@ -83,6 +83,28 @@ describe('config validation', () => {
     expect(configErrors(broken).join(' ')).toMatch(/gated on "work_mode", which comes later/);
   });
 
+  it('warns when a result declares a CTA action the client cannot perform', () => {
+    const odd = structuredClone(v1) as FunnelConfig;
+    odd.results.balanced.cta.action = 'open_checkout';
+
+    // A warning, not an error: the client degrades to revealing the
+    // recommendation rather than presenting a dead button.
+    expect(configErrors(odd)).toEqual([]);
+    const warnings = validateConfig(odd).filter((i) => i.level === 'warning');
+    expect(warnings.some((w) => /open_checkout/.test(w.message))).toBe(true);
+  });
+
+  it('rejects a result step whose resultSource the engine cannot honour', () => {
+    const odd = structuredClone(v1) as FunnelConfig;
+    odd.steps.result.resultSource = 'externalScoringService';
+    expect(configErrors(odd).join(' ')).toMatch(/unsupported resultSource/);
+  });
+
+  it('accepts the resultRules source the supplied config declares', () => {
+    expect(v1.steps.result.resultSource).toBe('resultRules');
+    expect(configErrors(v1)).toEqual([]);
+  });
+
   it('rejects a config with fewer than six screens', () => {
     const broken = structuredClone(v1) as FunnelConfig;
     broken.steps = { intro: broken.steps.intro, result: broken.steps.result };

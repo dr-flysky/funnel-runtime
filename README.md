@@ -174,6 +174,14 @@ Per-event properties, exactly as declared:
 | `result_viewed` | `result_id` |
 | `cta_clicked` | `result_id`, `action` |
 
+**The CTA performs its declared action.** Every result in the supplied config
+names `expand_recommendation`, so the recommendation list is *withheld* until
+the CTA is pressed — which is what makes `cta_clicked` a real conversion signal
+rather than a decorative click, and what the primary metric is measuring. An
+action the client does not implement still records the click and falls back to
+revealing the recommendation, and `validateConfig` warns at publish time so a
+dead button cannot ship unnoticed.
+
 `funnel_version`, `variant`, `experiment_id` and the UTM tags are taken from the
 **session row**, never from the request body, so a stale or tampered client
 cannot mislabel its own events.
