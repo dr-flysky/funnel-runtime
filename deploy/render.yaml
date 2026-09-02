@@ -1,0 +1,17 @@
+# Render.com blueprint. The disk keeps the SQLite file across deploys.
+services:
+  - type: web
+    name: funnel-runtime
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: DB_FILE
+        value: /data/funnel.db
+      # Set ADMIN_TOKEN in the dashboard to gate the version-control routes.
+    disk:
+      name: funnel-data
+      mountPath: /data
+      sizeGB: 1

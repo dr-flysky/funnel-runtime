@@ -1,0 +1,20 @@
+# Fly.io. `fly volumes create funnel_data --size 1` before the first deploy.
+app = "funnel-runtime"
+primary_region = "ams"
+
+[build]
+  dockerfile = "../Dockerfile"
+
+[env]
+  PORT = "3000"
+  DB_FILE = "/data/funnel.db"
+
+[[mounts]]
+  source = "funnel_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  min_machines_running = 1
