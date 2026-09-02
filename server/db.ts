@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS funnel_versions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   funnel_key   TEXT    NOT NULL,
   version      INTEGER NOT NULL,
+  -- The version the config declared for itself, kept for traceability. The
+  -- platform's own version column is what sessions pin to.
+  source_version INTEGER,
   config_json  TEXT    NOT NULL,
   note         TEXT,
   created_at   TEXT    NOT NULL,
@@ -54,6 +57,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   version        INTEGER NOT NULL,
   variant        TEXT    NOT NULL,
   variant_source TEXT    NOT NULL,
+  experiment_id  TEXT,
   utm_source     TEXT,
   utm_medium     TEXT,
   utm_campaign   TEXT,
@@ -66,9 +70,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- Server-authoritative navigation state, so refresh/back/reopen never lose it.
 CREATE TABLE IF NOT EXISTS session_state (
   session_id   TEXT PRIMARY KEY REFERENCES sessions(session_id),
-  current_step TEXT    NOT NULL,
-  history_json TEXT    NOT NULL DEFAULT '[]',
+  current_step TEXT,
   completed    INTEGER NOT NULL DEFAULT 0,
+  -- Resolved once the user reaches the result step.
+  result_id    TEXT,
   updated_at   TEXT    NOT NULL
 );
 
@@ -93,6 +98,7 @@ CREATE TABLE IF NOT EXISTS events (
   version_id   INTEGER,
   version      INTEGER NOT NULL,
   variant      TEXT    NOT NULL,
+  experiment_id TEXT,
   client_ts    TEXT,
   server_ts    TEXT    NOT NULL,
   client_seq   INTEGER,

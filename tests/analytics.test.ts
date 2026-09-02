@@ -7,21 +7,25 @@
  * obvious by inspection rather than by trusting the implementation.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { makeEvent, publishV2, seedV1, useFreshDb } from './helpers.ts';
+import { FUNNEL, makeEvent, publishV2, seedV1, useFreshDb } from './helpers.ts';
 import { createSession } from '../server/sessions.ts';
 import { ingestEvents } from '../server/events.ts';
 import { buildReport } from '../server/analytics.ts';
 
 function newSession(variant?: 'A' | 'B', campaign?: string) {
   return createSession({
-    funnelKey: 'quickcash',
+    funnelKey: FUNNEL,
     variantOverride: variant,
     utm: campaign ? { utm_campaign: campaign } : undefined,
   });
 }
 
 /** Walk a session through the given steps, emitting the usual event trio. */
-function walk(sessionId: string, steps: string[], opts: { complete?: boolean } = {}) {
+function walk(
+  sessionId: string,
+  steps: string[],
+  opts: { complete?: boolean; resultId?: string } = {},
+) {
   const events: Record<string, unknown>[] = [makeEvent(sessionId, 'session_started')];
   steps.forEach((step, i) => {
     events.push(makeEvent(sessionId, 'step_viewed', { step_id: step, client_seq: i * 3 + 1 }));
@@ -29,7 +33,12 @@ function walk(sessionId: string, steps: string[], opts: { complete?: boolean } =
     events.push(makeEvent(sessionId, 'step_completed', { step_id: step, client_seq: i * 3 + 3 }));
   });
   if (opts.complete) {
-    events.push(makeEvent(sessionId, 'result_viewed', { step_id: 'result' }));
+    events.push(
+      makeEvent(sessionId, 'result_viewed', {
+        step_id: 'result',
+        props: { result_id: opts.resultId ?? 'balanced' },
+      }),
+    );
   }
   ingestEvents(events);
   return events;
@@ -47,40 +56,40 @@ describe('analytics aggregation', () => {
     ingestEvents([
       makeEvent(s.sessionId, 'session_started'),
       ...Array.from({ length: 5 }, (_, i) =>
-        makeEvent(s.sessionId, 'step_viewed', { step_id: 'intro', client_seq: i }),
+        makeEvent(s.sessionId, 'step_viewed', { step_id: 'team_size', client_seq: i }),
       ),
     ]);
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
-    const intro = report.overall.steps.find((x) => x.stepId === 'intro')!;
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
+    const teamSize = report.overall.steps.find((x) => x.stepId === 'team_size')!;
 
     expect(report.overall.startedSessions).toBe(1);
-    expect(intro.reached).toBe(1);
-    expect(intro.viewsPerSession).toBe(5);
+    expect(teamSize.reached).toBe(1);
+    expect(teamSize.viewsPerSession).toBe(5);
   });
 
   it('is unaffected by duplicate events', () => {
     const s = newSession();
     const events = [
       makeEvent(s.sessionId, 'session_started'),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'intro' }),
-      makeEvent(s.sessionId, 'step_completed', { step_id: 'intro' }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'team_size' }),
+      makeEvent(s.sessionId, 'step_completed', { step_id: 'team_size' }),
     ];
     ingestEvents(events);
     ingestEvents(events); // the retry
     ingestEvents(events); // and another
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
-    const intro = report.overall.steps.find((x) => x.stepId === 'intro')!;
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
+    const teamSize = report.overall.steps.find((x) => x.stepId === 'team_size')!;
     expect(report.overall.startedSessions).toBe(1);
-    expect(intro.reached).toBe(1);
-    expect(intro.completed).toBe(1);
-    expect(intro.completionRate).toBe(1);
+    expect(teamSize.reached).toBe(1);
+    expect(teamSize.completed).toBe(1);
+    expect(teamSize.completionRate).toBe(1);
   });
 
   it('produces the same numbers whatever order events arrive in', () => {
     const forward = newSession();
-    const events = walk(forward.sessionId, ['intro', 'goal', 'amount'], { complete: true });
+    const events = walk(forward.sessionId, ['team_size', 'work_mode', 'priorities'], { complete: true });
 
     const shuffled = newSession();
     const reversed = events
@@ -88,82 +97,88 @@ describe('analytics aggregation', () => {
       .reverse();
     ingestEvents(reversed);
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     const a = report.byVariant;
 
     // Both sessions did identical things; totals must be exactly double.
     expect(report.overall.startedSessions).toBe(2);
     expect(report.overall.resultSessions).toBe(2);
-    const intro = report.overall.steps.find((x) => x.stepId === 'intro')!;
-    expect(intro.reached).toBe(2);
-    expect(intro.completed).toBe(2);
+    const teamSize = report.overall.steps.find((x) => x.stepId === 'team_size')!;
+    expect(teamSize.reached).toBe(2);
+    expect(teamSize.completed).toBe(2);
     expect(a.length).toBeGreaterThan(0);
   });
 
   it('computes drop-off as reached minus completed', () => {
-    // 3 sessions see `amount`; only 1 gets past it.
+    // 3 sessions see `priorities`; only 1 gets past it.
     const a = newSession();
     const b = newSession();
     const c = newSession();
 
-    walk(a.sessionId, ['intro', 'amount']);
+    walk(a.sessionId, ['team_size', 'priorities']);
     ingestEvents([
       makeEvent(b.sessionId, 'session_started'),
-      makeEvent(b.sessionId, 'step_viewed', { step_id: 'amount' }),
+      makeEvent(b.sessionId, 'step_viewed', { step_id: 'priorities' }),
     ]);
     ingestEvents([
       makeEvent(c.sessionId, 'session_started'),
-      makeEvent(c.sessionId, 'step_viewed', { step_id: 'amount' }),
+      makeEvent(c.sessionId, 'step_viewed', { step_id: 'priorities' }),
     ]);
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
-    const amount = report.overall.steps.find((x) => x.stepId === 'amount')!;
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
+    const priorities = report.overall.steps.find((x) => x.stepId === 'priorities')!;
 
-    expect(amount.reached).toBe(3);
-    expect(amount.completed).toBe(1);
-    expect(amount.dropOff).toBe(2);
-    expect(amount.completionRate).toBeCloseTo(1 / 3, 5);
-    expect(amount.dropOffRate).toBeCloseTo(2 / 3, 5);
+    expect(priorities.reached).toBe(3);
+    expect(priorities.completed).toBe(1);
+    expect(priorities.dropOff).toBe(2);
+    expect(priorities.completionRate).toBeCloseTo(1 / 3, 5);
+    expect(priorities.dropOffRate).toBeCloseTo(2 / 3, 5);
   });
 
   it('does not let Back inflate conversion', () => {
     const s = newSession();
     ingestEvents([
       makeEvent(s.sessionId, 'session_started'),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'intro', client_seq: 1 }),
-      makeEvent(s.sessionId, 'step_completed', { step_id: 'intro', client_seq: 2 }),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'goal', client_seq: 3 }),
-      makeEvent(s.sessionId, 'back_clicked', { step_id: 'goal', client_seq: 4 }),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'intro', client_seq: 5 }),
-      makeEvent(s.sessionId, 'step_completed', { step_id: 'intro', client_seq: 6 }),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'goal', client_seq: 7 }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'team_size', client_seq: 1 }),
+      makeEvent(s.sessionId, 'step_completed', { step_id: 'team_size', client_seq: 2 }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'work_mode', client_seq: 3 }),
+      makeEvent(s.sessionId, 'back_clicked', { step_id: 'work_mode', client_seq: 4 }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'team_size', client_seq: 5 }),
+      makeEvent(s.sessionId, 'step_completed', { step_id: 'team_size', client_seq: 6 }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'work_mode', client_seq: 7 }),
     ]);
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
-    const intro = report.overall.steps.find((x) => x.stepId === 'intro')!;
-    const goal = report.overall.steps.find((x) => x.stepId === 'goal')!;
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
+    const teamSize = report.overall.steps.find((x) => x.stepId === 'team_size')!;
+    const workMode = report.overall.steps.find((x) => x.stepId === 'work_mode')!;
 
-    expect(intro.reached).toBe(1);
-    expect(intro.completed).toBe(1);
-    expect(intro.viewsPerSession).toBe(2);
-    expect(goal.reached).toBe(1);
-    expect(goal.completed).toBe(0);
-    expect(goal.backs).toBe(1);
+    expect(teamSize.reached).toBe(1);
+    expect(teamSize.completed).toBe(1);
+    expect(teamSize.viewsPerSession).toBe(2);
+    expect(workMode.reached).toBe(1);
+    expect(workMode.completed).toBe(0);
+    expect(workMode.backs).toBe(1);
   });
 
   it('computes the primary metric as unique CTA sessions over unique starts', () => {
     const clicked = newSession();
     const notClicked = newSession();
 
-    walk(clicked.sessionId, ['intro'], { complete: true });
+    walk(clicked.sessionId, ['team_size'], { complete: true });
     // Clicking twice must not double-count.
     ingestEvents([
-      makeEvent(clicked.sessionId, 'cta_clicked', { step_id: 'result' }),
-      makeEvent(clicked.sessionId, 'cta_clicked', { step_id: 'result' }),
+      makeEvent(clicked.sessionId, 'cta_clicked', {
+        step_id: 'result',
+        props: { result_id: 'balanced', action: 'expand_recommendation' },
+      }),
+      makeEvent(clicked.sessionId, 'cta_clicked', {
+        step_id: 'result',
+        props: { result_id: 'balanced', action: 'expand_recommendation' },
+      }),
     ]);
-    walk(notClicked.sessionId, ['intro'], { complete: true });
+    walk(notClicked.sessionId, ['team_size'], { complete: true });
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     expect(report.overall.startedSessions).toBe(2);
     expect(report.overall.resultSessions).toBe(2);
     expect(report.overall.ctaSessions).toBe(1);
@@ -176,12 +191,17 @@ describe('analytics aggregation', () => {
     const a2 = newSession('A');
     const b1 = newSession('B');
 
-    walk(a1.sessionId, ['intro'], { complete: true });
-    ingestEvents([makeEvent(a1.sessionId, 'cta_clicked', { step_id: 'result' })]);
-    walk(a2.sessionId, ['intro']);
-    walk(b1.sessionId, ['intro'], { complete: true });
+    walk(a1.sessionId, ['team_size'], { complete: true });
+    ingestEvents([
+      makeEvent(a1.sessionId, 'cta_clicked', {
+        step_id: 'result',
+        props: { result_id: 'balanced', action: 'expand_recommendation' },
+      }),
+    ]);
+    walk(a2.sessionId, ['team_size']);
+    walk(b1.sessionId, ['team_size'], { complete: true });
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     const A = report.byVariant.find((v) => v.variant === 'A')!;
     const B = report.byVariant.find((v) => v.variant === 'B')!;
 
@@ -196,14 +216,14 @@ describe('analytics aggregation', () => {
   it('filters by UTM campaign', () => {
     const brand = newSession('A', 'brand_search');
     const email = newSession('A', 'winback_sep');
-    walk(brand.sessionId, ['intro'], { complete: true });
-    walk(email.sessionId, ['intro']);
+    walk(brand.sessionId, ['team_size'], { complete: true });
+    walk(email.sessionId, ['team_size']);
 
-    const all = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const all = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     expect(all.overall.startedSessions).toBe(2);
 
     const filtered = buildReport({
-      funnelKey: 'quickcash',
+      funnelKey: FUNNEL,
       campaign: 'brand_search',
       includeOverrides: true,
     });
@@ -215,13 +235,13 @@ describe('analytics aggregation', () => {
 
   it('splits metrics by version across a publish', () => {
     const onV1 = newSession('A');
-    walk(onV1.sessionId, ['intro'], { complete: true });
+    walk(onV1.sessionId, ['team_size'], { complete: true });
 
     publishV2();
     const onV2 = newSession('A');
-    walk(onV2.sessionId, ['intro'], { complete: true });
+    walk(onV2.sessionId, ['team_size'], { complete: true });
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     const v1 = report.byVersion.find((v) => v.version === 1)!;
     const v2 = report.byVersion.find((v) => v.version === 2)!;
 
@@ -233,40 +253,68 @@ describe('analytics aggregation', () => {
 
   it('excludes override sessions from the experiment read-out by default', () => {
     const forced = newSession('A');
-    walk(forced.sessionId, ['intro'], { complete: true });
+    walk(forced.sessionId, ['team_size'], { complete: true });
 
-    const clean = buildReport({ funnelKey: 'quickcash' });
-    const withOverrides = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const clean = buildReport({ funnelKey: FUNNEL });
+    const withOverrides = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
 
     expect(clean.overall.startedSessions).toBe(0);
     expect(withOverrides.overall.startedSessions).toBe(1);
   });
 
-  it('reports custom event types without any schema change', () => {
+  it('reports an event a newer version introduces, with no schema change', () => {
+    publishV2();
     const s = newSession('A');
     ingestEvents([
       makeEvent(s.sessionId, 'session_started'),
-      makeEvent(s.sessionId, 'help_opened', { step_id: 'amount' }),
-      makeEvent(s.sessionId, 'help_opened', { step_id: 'income' }),
+      makeEvent(s.sessionId, 'help_opened', { step_id: 'priorities' }),
+      makeEvent(s.sessionId, 'help_opened', { step_id: 'team_size' }),
     ]);
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     const help = report.customEvents.find((c) => c.type === 'help_opened')!;
     expect(help.events).toBe(2);
     expect(help.sessions).toBe(1);
+  });
+
+  it('breaks results down by unique session, not by event', () => {
+    const a = newSession('A');
+    const b = newSession('A');
+    const c = newSession('A');
+
+    walk(a.sessionId, ['team_size'], { complete: true, resultId: 'async_native' });
+    walk(b.sessionId, ['team_size'], { complete: true, resultId: 'async_native' });
+    walk(c.sessionId, ['team_size'], { complete: true, resultId: 'office_core' });
+
+    // A refresh of the result screen must not inflate the share.
+    ingestEvents([
+      makeEvent(a.sessionId, 'result_viewed', {
+        step_id: 'result',
+        props: { result_id: 'async_native' },
+      }),
+    ]);
+
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
+    const async_ = report.results.find((r) => r.resultId === 'async_native')!;
+    const office = report.results.find((r) => r.resultId === 'office_core')!;
+
+    expect(async_.sessions).toBe(2);
+    expect(async_.title).toBe('Async-native');
+    expect(office.sessions).toBe(1);
+    expect(async_.share).toBeCloseTo(2 / 3, 5);
   });
 
   it('surfaces data-quality counters so the numbers can be trusted', () => {
     const s = newSession('A');
     const events = [
       makeEvent(s.sessionId, 'session_started'),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'intro', client_seq: 1 }),
-      makeEvent(s.sessionId, 'step_viewed', { step_id: 'intro', client_seq: 2 }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'team_size', client_seq: 1 }),
+      makeEvent(s.sessionId, 'step_viewed', { step_id: 'team_size', client_seq: 2 }),
     ];
     ingestEvents(events);
     ingestEvents(events);
 
-    const report = buildReport({ funnelKey: 'quickcash', includeOverrides: true });
+    const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     expect(report.dataQuality.distinctSessions).toBe(1);
     expect(report.dataQuality.totalEvents).toBe(3);
     expect(report.dataQuality.duplicatesSuppressed).toBe(3);

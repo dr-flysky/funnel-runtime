@@ -1,132 +1,199 @@
 /**
  * Funnel Runtime — shared, dependency-free funnel engine.
  *
- * This module is imported by the server, the client and the tests. It is pure:
- * no I/O, no globals. Everything about "what screen comes next" lives here so
- * that the server can enforce it and the client can render it without the two
- * drifting apart.
+ * Speaks the supplied config schema (`schemaVersion` 1.0) natively: the JSON
+ * that is published is the JSON that is stored and executed, with no
+ * translation layer to drift out of sync.
+ *
+ * The navigation model is deliberately the one the config describes:
+ *   - each variant supplies a full ordered `stepSequence`
+ *   - a step may carry `visibleWhen`, which hides it for some answers
+ *   - the visible path is the sequence filtered by those predicates
+ *
+ * That is branching by *visibility* rather than by graph edges. It cannot
+ * produce an unreachable step or a dangling target, which is why the engine
+ * has no transition-repair logic.
+ *
+ * Pure: no I/O, no globals. Imported by the server, the client and the tests so
+ * that all three agree on what the funnel does.
  */
 
 // ---------------------------------------------------------------------------
 // Config types
 // ---------------------------------------------------------------------------
 
-export type StepType = 'info' | 'single_select' | 'multi_select' | 'number';
+export type StepType = 'info' | 'number' | 'single-select' | 'multi-select' | 'result';
 
-export interface Option {
-  id: string;
-  label: string;
-  hint?: string;
-}
+export const INTERACTIVE_TYPES: StepType[] = ['number', 'single-select', 'multi-select'];
 
-export interface StepBase {
-  id: string;
-  type: StepType;
-  title: string;
-  subtitle?: string;
-  /** Optional inline help copy; opening it emits the `help_opened` event. */
-  help?: string;
-  /** Explicit transitions. When omitted the engine falls back to array order. */
-  next?: NextRule[] | string;
-}
-
-export interface InfoStep extends StepBase {
-  type: 'info';
+export interface StepContent {
+  eyebrow?: string;
+  title?: string;
   body?: string;
-  bullets?: string[];
-  continueLabel?: string;
+  helperText?: string;
+  primaryActionLabel?: string;
+  loadingTitle?: string;
+  errorTitle?: string;
+  retryLabel?: string;
 }
 
-export interface SelectStep extends StepBase {
-  type: 'single_select' | 'multi_select';
-  options: Option[];
-  required?: boolean;
-  minSelected?: number;
-  maxSelected?: number;
+export interface OptionDef {
+  value: string;
+  label: string;
 }
 
-export interface NumberStep extends StepBase {
-  type: 'number';
+export interface StepInput {
+  name: string;
   min?: number;
   max?: number;
   step?: number;
   unit?: string;
-  placeholder?: string;
-  required?: boolean;
+  options?: OptionDef[];
 }
 
-export type Step = InfoStep | SelectStep | NumberStep;
+export interface StepValidation {
+  required?: boolean;
+  minSelections?: number;
+  maxSelections?: number;
+  /** Config-supplied copy, keyed by rule name. The engine never invents text. */
+  messages?: Record<string, string>;
+}
 
-export type ConditionOp =
-  | 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'
-  | 'in' | 'not_in' | 'includes' | 'answered' | 'not_answered';
+export type Operator =
+  | 'eq' | 'ne'
+  | 'in' | 'not_in'
+  | 'gt' | 'gte' | 'lt' | 'lte'
+  | 'contains' | 'not_contains'
+  | 'answered' | 'not_answered';
 
-export interface Condition {
-  /** Step id whose answer is being tested. */
-  field: string;
-  op: ConditionOp;
+/** A leaf predicate: compare one previous answer against a value. */
+export interface ConditionLeaf {
+  answer: string;
+  operator: Operator;
   value?: unknown;
 }
 
-export interface ConditionGroup {
-  all?: Condition[];
-  any?: Condition[];
+export type ConditionNode =
+  | ConditionLeaf
+  | { all: ConditionNode[] }
+  | { any: ConditionNode[] }
+  | { not: ConditionNode };
+
+export interface StepDef {
+  id: string;
+  type: StepType;
+  content: StepContent;
+  input?: StepInput;
+  validation?: StepValidation;
+  visibleWhen?: ConditionNode;
+  resultSource?: string;
 }
 
-export interface NextRule {
-  /** Omitted `when` means "always" — use as the final default rule. */
-  when?: ConditionGroup;
-  /** A step id, or the RESULT sentinel. */
-  goto: string;
+export interface ResultCta {
+  label: string;
+  action: string;
 }
 
-export interface ResultScreen {
+export interface ResultDef {
   id: string;
   title: string;
-  body?: string;
-  bullets?: string[];
-  cta: { id: string; label: string; href?: string };
+  summary?: string;
+  recommendations?: string[];
+  cta: ResultCta;
+}
+
+export interface ResultRule {
+  resultId: string;
+  when: ConditionNode;
 }
 
 export interface VariantDef {
-  label?: string;
-  /** Relative weight for assignment. Defaults to 1. */
   weight?: number;
-  /** Step ids removed for this variant. Transitions are re-pointed automatically. */
-  removeSteps?: string[];
-  /** Optional explicit ordering of the remaining step ids. */
-  stepOrder?: string[];
-  /** Per-step shallow patch, e.g. new title/next/options. */
-  patch?: Record<string, Partial<Step>>;
-  /** Shallow patch of the result screen. */
-  result?: Partial<ResultScreen>;
+  stepSequence: string[];
+  stepOverrides?: Record<string, DeepPartial<StepDef>>;
+  resultOverrides?: Record<string, DeepPartial<ResultDef>>;
 }
 
 export interface ExperimentDef {
-  key: string;
-  hypothesis: string;
-  primaryMetric: string;
+  id: string;
+  assignment?: 'server' | 'client';
+  sticky?: boolean;
+  overrideQueryParam?: string;
   variants: Record<string, VariantDef>;
 }
 
-export interface FunnelConfig {
-  key: string;
-  name: string;
-  /** Extra event types this version is allowed to emit, beyond the core set. */
-  extraEvents?: string[];
-  experiment: ExperimentDef;
-  steps: Step[];
-  result: ResultScreen;
+export interface SessionPolicy {
+  ttlHours?: number;
+  persistAnswers?: boolean;
+  pinVersion?: boolean;
+  pinExperimentVariant?: boolean;
 }
 
-/** Sentinel `goto` target meaning "leave the step graph and show the result". */
-export const RESULT = '@result';
+export interface ProgressPolicy {
+  countVisibleOnly?: boolean;
+  excludeTypes?: StepType[];
+}
+
+export interface EventDef {
+  name: string;
+  trigger?: string;
+  properties?: string[];
+}
+
+export interface EventsPolicy {
+  baseProperties?: string[];
+  allowed?: EventDef[];
+  privacy?: {
+    storeRawAnswers?: boolean;
+    allowAnswerKinds?: boolean;
+  };
+}
+
+export interface FunnelConfig {
+  schemaVersion: string;
+  funnelId: string;
+  version?: number;
+  status?: string;
+  locale?: string;
+  title: string;
+  description?: string;
+  session?: SessionPolicy;
+  progress?: ProgressPolicy;
+  experiment: ExperimentDef;
+  steps: Record<string, StepDef>;
+  resultRules?: ResultRule[];
+  defaultResultId: string;
+  results: Record<string, ResultDef>;
+  events?: EventsPolicy;
+}
+
+type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
 
 export type AnswerValue = string | string[] | number | null;
 export type Answers = Record<string, AnswerValue>;
 
+/**
+ * A config with one variant's sequence and overrides already applied: an
+ * ordered step list and a merged result set. This is what the client receives,
+ * so the browser never has to know a variant exists.
+ */
+export interface ResolvedFunnel {
+  funnelId: string;
+  version: number;
+  title: string;
+  locale?: string;
+  variant: string;
+  experimentId: string;
+  steps: StepDef[];
+  results: Record<string, ResultDef>;
+  resultRules: ResultRule[];
+  defaultResultId: string;
+  progress: ProgressPolicy;
+  session: SessionPolicy;
+}
+
 // ---------------------------------------------------------------------------
-// Core event catalogue
+// Event catalogue
 // ---------------------------------------------------------------------------
 
 export const CORE_EVENT_TYPES = [
@@ -142,125 +209,92 @@ export const CORE_EVENT_TYPES = [
 export type CoreEventType = (typeof CORE_EVENT_TYPES)[number];
 
 /**
- * Event types are open by design: a new config version may introduce a new
- * event without a database migration or a server code change. We only enforce
- * a naming shape so the analytics layer stays predictable.
+ * Event names are validated by shape, not against a fixed list, so a future
+ * config version can introduce an event without a schema migration or a server
+ * change. `allowedEventNames` narrows that to what a given version declares.
  */
-export const EVENT_TYPE_PATTERN = /^[a-z][a-z0-9_]{2,63}$/;
+export const EVENT_NAME_PATTERN = /^[a-z][a-z0-9_]{2,63}$/;
 
-export function isValidEventType(type: string): boolean {
-  return EVENT_TYPE_PATTERN.test(type);
+export function isValidEventName(name: string): boolean {
+  return EVENT_NAME_PATTERN.test(name);
+}
+
+export function allowedEventNames(config: FunnelConfig): Set<string> {
+  const names = new Set<string>(CORE_EVENT_TYPES);
+  for (const e of config.events?.allowed ?? []) {
+    if (e?.name) names.add(e.name);
+  }
+  return names;
+}
+
+// ---------------------------------------------------------------------------
+// Deep merge (used by stepOverrides / resultOverrides)
+// ---------------------------------------------------------------------------
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Recursive merge; arrays are replaced wholesale, not concatenated. */
+function deepMerge<T>(base: T, patch: unknown): T {
+  if (!isPlainObject(patch)) return (patch === undefined ? base : (patch as T));
+  if (!isPlainObject(base)) return patch as T;
+
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    out[key] = key in base ? deepMerge((base as Record<string, unknown>)[key], value) : value;
+  }
+  return out as T;
 }
 
 // ---------------------------------------------------------------------------
 // Variant resolution
 // ---------------------------------------------------------------------------
 
-function shallowPatchStep(step: Step, patch: Partial<Step>): Step {
-  return { ...step, ...patch } as Step;
-}
-
-/** The target a step falls through to when no rule matches: explicit or array order. */
-function defaultTargetOf(step: Step, order: string[], byId: Map<string, Step>): string {
-  if (typeof step.next === 'string') return step.next;
-  if (Array.isArray(step.next) && step.next.length > 0) {
-    const fallback = step.next.find((r) => !r.when);
-    if (fallback) return fallback.goto;
-    return step.next[step.next.length - 1].goto;
-  }
-  const idx = order.indexOf(step.id);
-  if (idx >= 0 && idx + 1 < order.length) {
-    const nextId = order[idx + 1];
-    if (byId.has(nextId)) return nextId;
-  }
-  return RESULT;
-}
-
 /**
- * Rewrite a `goto` that points at a removed step so it lands on the first
- * surviving step reachable from it. Guards against cycles among removed steps.
- */
-function reroute(
-  target: string,
-  removed: Set<string>,
-  byId: Map<string, Step>,
-  order: string[],
-): string {
-  let cursor = target;
-  const seen = new Set<string>();
-  while (cursor !== RESULT && removed.has(cursor)) {
-    if (seen.has(cursor)) return RESULT;
-    seen.add(cursor);
-    const step = byId.get(cursor);
-    if (!step) return RESULT;
-    cursor = defaultTargetOf(step, order, byId);
-  }
-  return cursor;
-}
-
-/**
- * Produce the concrete config a given variant sees: patches applied, removed
- * steps dropped, transitions repaired, result screen merged.
+ * Build the concrete funnel a given variant sees.
  *
- * Unknown variant keys fall back to an unmodified config rather than throwing,
+ * An unknown variant falls back to the first declared one rather than throwing,
  * so a session pinned to an old version can never be bricked by a config that
  * no longer defines its variant.
  */
-export function resolveVariantConfig(config: FunnelConfig, variant: string): FunnelConfig {
-  const def = config.experiment?.variants?.[variant];
-  if (!def) return config;
+export function resolveVariant(config: FunnelConfig, variant: string): ResolvedFunnel {
+  const variants = config.experiment?.variants ?? {};
+  const key = variants[variant] ? variant : Object.keys(variants).sort()[0];
+  const def: VariantDef | undefined = variants[key];
 
-  const originalOrder = config.steps.map((s) => s.id);
-  const originalById = new Map(config.steps.map((s) => [s.id, s]));
-  const removed = new Set(def.removeSteps ?? []);
+  const sequence = def?.stepSequence?.length
+    ? def.stepSequence
+    : Object.keys(config.steps ?? {});
 
-  // 1. drop removed steps, 2. apply per-step patches
-  let steps = config.steps
-    .filter((s) => !removed.has(s.id))
-    .map((s) => (def.patch?.[s.id] ? shallowPatchStep(s, def.patch![s.id]) : s));
-
-  // 3. optional explicit reordering (ids not listed keep their relative order at the end)
-  if (def.stepOrder?.length) {
-    const rank = new Map(def.stepOrder.map((id, i) => [id, i]));
-    steps = [...steps].sort((a, b) => {
-      const ra = rank.has(a.id) ? rank.get(a.id)! : Number.MAX_SAFE_INTEGER;
-      const rb = rank.has(b.id) ? rank.get(b.id)! : Number.MAX_SAFE_INTEGER;
-      if (ra !== rb) return ra - rb;
-      return originalOrder.indexOf(a.id) - originalOrder.indexOf(b.id);
-    });
+  const steps: StepDef[] = [];
+  for (const id of sequence) {
+    const base = config.steps?.[id];
+    if (!base) continue; // a sequence naming an unknown step simply skips it
+    const override = def?.stepOverrides?.[id];
+    steps.push(override ? deepMerge(base, override) : base);
   }
 
-  // 4. repair every transition that pointed at a removed step
-  if (removed.size > 0) {
-    const survivingOrder = steps.map((s) => s.id);
-    steps = steps.map((s) => {
-      if (typeof s.next === 'string') {
-        return { ...s, next: reroute(s.next, removed, originalById, originalOrder) } as Step;
-      }
-      if (Array.isArray(s.next)) {
-        const rules = s.next.map((r) => ({
-          ...r,
-          goto: reroute(r.goto, removed, originalById, originalOrder),
-        }));
-        return { ...s, next: rules } as Step;
-      }
-      // Implicit array-order transition: verify it still resolves inside the
-      // surviving set, otherwise pin it explicitly.
-      const implicit = defaultTargetOf(s, originalOrder, originalById);
-      const repaired = reroute(implicit, removed, originalById, originalOrder);
-      const idx = survivingOrder.indexOf(s.id);
-      const naturalNext =
-        idx >= 0 && idx + 1 < survivingOrder.length ? survivingOrder[idx + 1] : RESULT;
-      if (repaired === naturalNext) return s;
-      return { ...s, next: repaired } as Step;
-    });
+  const results: Record<string, ResultDef> = {};
+  for (const [id, result] of Object.entries(config.results ?? {})) {
+    const override = def?.resultOverrides?.[id];
+    results[id] = override ? deepMerge(result, override) : result;
   }
 
-  const result: ResultScreen = def.result
-    ? { ...config.result, ...def.result, cta: { ...config.result.cta, ...(def.result.cta ?? {}) } }
-    : config.result;
-
-  return { ...config, steps, result };
+  return {
+    funnelId: config.funnelId,
+    version: config.version ?? 1,
+    title: config.title,
+    locale: config.locale,
+    variant: key ?? 'A',
+    experimentId: config.experiment?.id ?? '',
+    steps,
+    results,
+    resultRules: config.resultRules ?? [],
+    defaultResultId: config.defaultResultId,
+    progress: config.progress ?? {},
+    session: config.session ?? {},
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -273,19 +307,20 @@ function toNumber(v: unknown): number | null {
   return null;
 }
 
-export function evaluateCondition(cond: Condition, answers: Answers): boolean {
-  const actual = answers[cond.field];
-  switch (cond.op) {
+function isAnswered(v: AnswerValue | undefined): boolean {
+  if (v === undefined || v === null || v === '') return false;
+  if (Array.isArray(v) && v.length === 0) return false;
+  return true;
+}
+
+export function evaluateLeaf(cond: ConditionLeaf, answers: Answers): boolean {
+  const actual = answers[cond.answer];
+
+  switch (cond.operator) {
     case 'answered':
-      return (
-        actual !== undefined && actual !== null && actual !== '' &&
-        !(Array.isArray(actual) && actual.length === 0)
-      );
+      return isAnswered(actual);
     case 'not_answered':
-      return (
-        actual === undefined || actual === null || actual === '' ||
-        (Array.isArray(actual) && actual.length === 0)
-      );
+      return !isAnswered(actual);
     case 'eq':
       return actual === cond.value;
     case 'ne':
@@ -294,8 +329,10 @@ export function evaluateCondition(cond: Condition, answers: Answers): boolean {
       return Array.isArray(cond.value) && (cond.value as unknown[]).includes(actual as unknown);
     case 'not_in':
       return Array.isArray(cond.value) && !(cond.value as unknown[]).includes(actual as unknown);
-    case 'includes':
+    case 'contains':
       return Array.isArray(actual) && (actual as string[]).includes(cond.value as string);
+    case 'not_contains':
+      return Array.isArray(actual) && !(actual as string[]).includes(cond.value as string);
     case 'gt':
     case 'gte':
     case 'lt':
@@ -303,9 +340,9 @@ export function evaluateCondition(cond: Condition, answers: Answers): boolean {
       const a = toNumber(actual);
       const b = toNumber(cond.value);
       if (a === null || b === null) return false;
-      if (cond.op === 'gt') return a > b;
-      if (cond.op === 'gte') return a >= b;
-      if (cond.op === 'lt') return a < b;
+      if (cond.operator === 'gt') return a > b;
+      if (cond.operator === 'gte') return a >= b;
+      if (cond.operator === 'lt') return a < b;
       return a <= b;
     }
     default:
@@ -313,198 +350,249 @@ export function evaluateCondition(cond: Condition, answers: Answers): boolean {
   }
 }
 
-export function evaluateGroup(group: ConditionGroup | undefined, answers: Answers): boolean {
-  if (!group) return true;
-  if (group.all?.length && !group.all.every((c) => evaluateCondition(c, answers))) return false;
-  if (group.any?.length && !group.any.some((c) => evaluateCondition(c, answers))) return false;
+/** Evaluate a condition tree. An absent node means "always true". */
+export function evaluateCondition(node: ConditionNode | undefined, answers: Answers): boolean {
+  if (!node) return true;
+
+  if ('all' in node && Array.isArray(node.all)) {
+    return node.all.every((child) => evaluateCondition(child, answers));
+  }
+  if ('any' in node && Array.isArray(node.any)) {
+    return node.any.some((child) => evaluateCondition(child, answers));
+  }
+  if ('not' in node && node.not) {
+    return !evaluateCondition(node.not, answers);
+  }
+  if ('answer' in node && 'operator' in node) {
+    return evaluateLeaf(node as ConditionLeaf, answers);
+  }
   return true;
 }
 
-/** True when every condition in the group can be decided from the answers we have. */
-function groupIsDecidable(group: ConditionGroup | undefined, answers: Answers): boolean {
-  if (!group) return true;
-  const all = [...(group.all ?? []), ...(group.any ?? [])];
-  return all.every((c) => {
-    if (c.op === 'answered' || c.op === 'not_answered') return true;
-    const v = answers[c.field];
-    return v !== undefined && v !== null && v !== '';
-  });
+/** Every answer id a condition tree reads. Used by config validation. */
+export function conditionDependencies(node: ConditionNode | undefined, out: Set<string> = new Set()): Set<string> {
+  if (!node) return out;
+  if ('all' in node && Array.isArray(node.all)) node.all.forEach((c) => conditionDependencies(c, out));
+  else if ('any' in node && Array.isArray(node.any)) node.any.forEach((c) => conditionDependencies(c, out));
+  else if ('not' in node && node.not) conditionDependencies(node.not, out);
+  else if ('answer' in node) out.add((node as ConditionLeaf).answer);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------------------
 
-export function stepById(config: FunnelConfig, id: string): Step | undefined {
-  return config.steps.find((s) => s.id === id);
-}
-
-export function firstStepId(config: FunnelConfig): string {
-  return config.steps.length > 0 ? config.steps[0].id : RESULT;
+export function stepById(funnel: ResolvedFunnel, id: string): StepDef | undefined {
+  return funnel.steps.find((s) => s.id === id);
 }
 
 /**
- * The next step id after `currentId` given `answers`.
- * Returns RESULT when the funnel is finished.
+ * The steps this user actually sees, in order: the variant's sequence with
+ * every `visibleWhen` predicate applied against their own answers.
  */
-export function nextStepId(config: FunnelConfig, currentId: string, answers: Answers): string {
-  const step = stepById(config, currentId);
-  if (!step) return RESULT;
-  const order = config.steps.map((s) => s.id);
-  const byId = new Map(config.steps.map((s) => [s.id, s]));
+export function visibleSteps(funnel: ResolvedFunnel, answers: Answers): StepDef[] {
+  return funnel.steps.filter((s) => evaluateCondition(s.visibleWhen, answers));
+}
 
-  if (typeof step.next === 'string') return byId.has(step.next) ? step.next : RESULT;
-
-  if (Array.isArray(step.next)) {
-    for (const rule of step.next) {
-      if (evaluateGroup(rule.when, answers)) {
-        return rule.goto === RESULT || byId.has(rule.goto) ? rule.goto : RESULT;
-      }
-    }
-    return RESULT;
-  }
-
-  const idx = order.indexOf(currentId);
-  return idx >= 0 && idx + 1 < order.length ? order[idx + 1] : RESULT;
+export function firstStepId(funnel: ResolvedFunnel, answers: Answers = {}): string | null {
+  const visible = visibleSteps(funnel, answers);
+  return visible.length > 0 ? visible[0].id : null;
 }
 
 /**
- * Forward-looking list of steps the user will see, starting at `fromId`.
+ * The next visible step after `currentId`, or null at the end of the funnel.
  *
- * Where a branch cannot yet be decided (the deciding answer has not been given)
- * we take the first rule as a deterministic estimate, so the progress bar is
- * stable rather than jumping between renders.
+ * Recomputed from the answers every time, so an answer that hides a later step
+ * takes effect immediately — including when the user goes back and changes it.
  */
-export function reachablePath(config: FunnelConfig, fromId: string, answers: Answers): string[] {
-  const path: string[] = [];
-  const seen = new Set<string>();
-  let cursor = fromId;
-
-  while (cursor !== RESULT && !seen.has(cursor)) {
-    const step = stepById(config, cursor);
-    if (!step) break;
-    seen.add(cursor);
-    path.push(cursor);
-
-    if (typeof step.next === 'string') {
-      cursor = step.next;
-      continue;
-    }
-    if (Array.isArray(step.next)) {
-      let picked: string | null = null;
-      for (const rule of step.next) {
-        if (!groupIsDecidable(rule.when, answers)) {
-          // Undecided branch: estimate with this rule's target.
-          picked = rule.goto;
-          break;
-        }
-        if (evaluateGroup(rule.when, answers)) {
-          picked = rule.goto;
-          break;
-        }
-      }
-      cursor = picked ?? RESULT;
-      continue;
-    }
-    cursor = nextStepId(config, cursor, answers);
+export function nextStepId(funnel: ResolvedFunnel, currentId: string, answers: Answers): string | null {
+  const visible = visibleSteps(funnel, answers);
+  const idx = visible.findIndex((s) => s.id === currentId);
+  if (idx === -1) {
+    // The current step just became invisible; fall forward to the first
+    // visible step that follows it in the underlying sequence.
+    const seqIdx = funnel.steps.findIndex((s) => s.id === currentId);
+    if (seqIdx === -1) return visible[0]?.id ?? null;
+    const after = funnel.steps.slice(seqIdx + 1).map((s) => s.id);
+    return visible.find((s) => after.includes(s.id))?.id ?? null;
   }
-  return path;
+  return idx + 1 < visible.length ? visible[idx + 1].id : null;
 }
 
-export interface Progress {
-  /** 1-based position of the current step among the steps this user will see. */
-  position: number;
-  /** Estimated total number of steps on this user's path. */
-  total: number;
-  percent: number;
+/** The previous visible step before `currentId`, or null at the start. */
+export function previousStepId(funnel: ResolvedFunnel, currentId: string, answers: Answers): string | null {
+  const visible = visibleSteps(funnel, answers);
+  const idx = visible.findIndex((s) => s.id === currentId);
+  if (idx <= 0) return null;
+  return visible[idx - 1].id;
 }
 
-/**
- * Progress counts only the steps *this* user can reach: history already walked
- * plus the forward-looking estimate. It never counts branches the user's own
- * answers have ruled out.
- */
-export function computeProgress(
-  config: FunnelConfig,
-  currentId: string,
-  answers: Answers,
-  history: string[],
-): Progress {
-  if (currentId === RESULT) {
-    const total = Math.max(history.length, 1);
-    return { position: total, total, percent: 100 };
-  }
-  const ahead = reachablePath(config, currentId, answers);
-  const behind = history.filter((id) => id !== currentId).length;
-  const total = Math.max(behind + ahead.length, 1);
-  const position = Math.min(behind + 1, total);
-  const percent = Math.round((behind / total) * 100);
-  return { position, total, percent };
+export function isResultStep(step: StepDef | undefined): boolean {
+  return step?.type === 'result';
 }
 
 // ---------------------------------------------------------------------------
-// Validation
+// Progress
+// ---------------------------------------------------------------------------
+
+export interface Progress {
+  /** 1-based position among the steps that count toward progress. */
+  position: number;
+  total: number;
+  percent: number;
+  /** Index and count over *all* visible steps, for the step_viewed event. */
+  visibleIndex: number;
+  visibleCount: number;
+}
+
+/**
+ * Progress honours the config's own policy: `countVisibleOnly` restricts the
+ * denominator to steps this user can reach, and `excludeTypes` drops screens
+ * that are not questions (info and result) so the bar measures work remaining,
+ * not screens remaining.
+ */
+export function computeProgress(
+  funnel: ResolvedFunnel,
+  currentId: string | null,
+  answers: Answers,
+): Progress {
+  const policy = funnel.progress ?? {};
+  const excluded = new Set<StepType>(policy.excludeTypes ?? []);
+
+  const pool = policy.countVisibleOnly === false ? funnel.steps : visibleSteps(funnel, answers);
+  const visible = visibleSteps(funnel, answers);
+  const counted = pool.filter((s) => !excluded.has(s.type));
+
+  const visibleIndex = currentId ? visible.findIndex((s) => s.id === currentId) : visible.length;
+  const countedIdx = currentId ? counted.findIndex((s) => s.id === currentId) : -1;
+
+  const total = Math.max(counted.length, 1);
+
+  // On an excluded screen (intro/result) we report the boundary rather than a
+  // position that does not exist in the counted set.
+  const position = countedIdx >= 0 ? countedIdx + 1 : currentId === null ? total : Math.min(total, countedBefore(counted, visible, currentId) + 1);
+  const done = countedIdx >= 0 ? countedIdx : countedBefore(counted, visible, currentId);
+
+  return {
+    position: Math.min(position, total),
+    total,
+    percent: Math.max(0, Math.min(100, Math.round((done / total) * 100))),
+    visibleIndex: visibleIndex === -1 ? 0 : visibleIndex,
+    visibleCount: visible.length,
+  };
+}
+
+/** How many counted steps sit before `currentId` in the visible order. */
+function countedBefore(counted: StepDef[], visible: StepDef[], currentId: string | null): number {
+  if (!currentId) return counted.length;
+  const pos = visible.findIndex((s) => s.id === currentId);
+  if (pos === -1) return 0;
+  const before = new Set(visible.slice(0, pos).map((s) => s.id));
+  return counted.filter((s) => before.has(s.id)).length;
+}
+
+// ---------------------------------------------------------------------------
+// Answer validation
 // ---------------------------------------------------------------------------
 
 export interface ValidationResult {
   ok: boolean;
   error?: string;
-  /** The coerced value to persist (e.g. numeric strings become numbers). */
+  /** The coerced value to persist (numeric strings become numbers). */
   value?: AnswerValue;
 }
 
-export function validateAnswer(step: Step, raw: unknown): ValidationResult {
+/**
+ * Prefer the config's own copy, trying keys from most to least specific.
+ *
+ * An empty multi-select violates both `required` and `minSelections`; a config
+ * may supply copy for either. Taking the first key that exists means we use the
+ * author's wording rather than falling through to generic engine text just
+ * because they chose the other name.
+ */
+function message(step: StepDef, keys: string | string[], fallback: string): string {
+  const messages = step.validation?.messages;
+  if (messages) {
+    for (const key of Array.isArray(keys) ? keys : [keys]) {
+      const text = messages[key];
+      if (text) return text;
+    }
+  }
+  return fallback;
+}
+
+export function validateAnswer(step: StepDef, raw: unknown): ValidationResult {
+  const required = step.validation?.required === true;
+
   switch (step.type) {
     case 'info':
+    case 'result':
       return { ok: true, value: null };
 
-    case 'single_select': {
-      const required = step.required !== false;
-      if (raw === undefined || raw === null || raw === '') {
+    case 'single-select': {
+      if (!isAnswered(raw as AnswerValue)) {
         return required
-          ? { ok: false, error: 'Please choose an option.' }
+          ? { ok: false, error: message(step, 'required', 'Select an option.') }
           : { ok: true, value: null };
       }
-      if (typeof raw !== 'string') return { ok: false, error: 'Invalid selection.' };
-      if (!step.options.some((o) => o.id === raw)) return { ok: false, error: 'Unknown option.' };
+      if (typeof raw !== 'string') {
+        return { ok: false, error: message(step, 'invalid', 'Invalid selection.') };
+      }
+      const options = step.input?.options ?? [];
+      if (!options.some((o) => o.value === raw)) {
+        return { ok: false, error: message(step, 'invalid', 'Unknown option.') };
+      }
       return { ok: true, value: raw };
     }
 
-    case 'multi_select': {
-      const required = step.required !== false;
-      const arr = Array.isArray(raw)
-        ? (raw as unknown[])
-        : raw === undefined || raw === null
-          ? []
-          : null;
-      if (arr === null) return { ok: false, error: 'Invalid selection.' };
-      const ids = arr.map(String);
-      if (ids.some((id) => !step.options.some((o) => o.id === id))) {
-        return { ok: false, error: 'Unknown option.' };
+    case 'multi-select': {
+      const arr = Array.isArray(raw) ? (raw as unknown[]) : raw == null ? [] : null;
+      if (arr === null) {
+        return { ok: false, error: message(step, 'invalid', 'Invalid selection.') };
       }
-      if (new Set(ids).size !== ids.length) return { ok: false, error: 'Duplicate selection.' };
-      const min = step.minSelected ?? (required ? 1 : 0);
-      if (ids.length < min) {
-        return { ok: false, error: `Please choose at least ${min} option${min === 1 ? '' : 's'}.` };
+      const values = arr.map(String);
+      const options = step.input?.options ?? [];
+      if (values.some((v) => !options.some((o) => o.value === v))) {
+        return { ok: false, error: message(step, 'invalid', 'Unknown option.') };
       }
-      if (step.maxSelected !== undefined && ids.length > step.maxSelected) {
-        return { ok: false, error: `Please choose no more than ${step.maxSelected}.` };
+      if (new Set(values).size !== values.length) {
+        return { ok: false, error: message(step, 'invalid', 'Duplicate selection.') };
       }
-      return { ok: true, value: ids };
+
+      const min = step.validation?.minSelections ?? (required ? 1 : 0);
+      if (values.length < min) {
+        return { ok: false, error: message(step, ['minSelections', 'required'], `Choose at least ${min}.`) };
+      }
+      const max = step.validation?.maxSelections;
+      if (max !== undefined && values.length > max) {
+        return { ok: false, error: message(step, 'maxSelections', `Choose no more than ${max}.`) };
+      }
+      return { ok: true, value: values };
     }
 
     case 'number': {
-      const required = step.required !== false;
       if (raw === undefined || raw === null || raw === '') {
-        return required ? { ok: false, error: 'Please enter a value.' } : { ok: true, value: null };
+        return required
+          ? { ok: false, error: message(step, 'required', 'Enter a value.') }
+          : { ok: true, value: null };
       }
       const n = toNumber(raw);
-      if (n === null) return { ok: false, error: 'Please enter a number.' };
-      if (step.min !== undefined && n < step.min) {
-        return { ok: false, error: `Must be at least ${step.min}.` };
+      if (n === null) {
+        return { ok: false, error: message(step, 'invalid', 'Enter a number.') };
       }
-      if (step.max !== undefined && n > step.max) {
-        return { ok: false, error: `Must be no more than ${step.max}.` };
+      const { min, max, step: increment } = step.input ?? {};
+      if (min !== undefined && n < min) {
+        return { ok: false, error: message(step, 'min', `Enter a value of at least ${min}.`) };
+      }
+      if (max !== undefined && n > max) {
+        return { ok: false, error: message(step, 'max', `Enter a value up to ${max}.`) };
+      }
+      if (increment && increment > 0 && min !== undefined) {
+        const offset = (n - min) % increment;
+        if (Math.abs(offset) > 1e-9 && Math.abs(offset - increment) > 1e-9) {
+          return { ok: false, error: message(step, 'step', `Enter a value in increments of ${increment}.`) };
+        }
       }
       return { ok: true, value: n };
     }
@@ -515,49 +603,55 @@ export function validateAnswer(step: Step, raw: unknown): ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Result selection
+// ---------------------------------------------------------------------------
+
+/**
+ * First matching rule wins; `defaultResultId` catches everyone else. Order in
+ * the config is therefore significant, and validation checks the default
+ * exists so a session can never reach a result screen that is not defined.
+ */
+export function resolveResultId(funnel: ResolvedFunnel, answers: Answers): string {
+  for (const rule of funnel.resultRules) {
+    if (evaluateCondition(rule.when, answers)) return rule.resultId;
+  }
+  return funnel.defaultResultId;
+}
+
+export function resolveResult(funnel: ResolvedFunnel, answers: Answers): ResultDef | undefined {
+  return funnel.results[resolveResultId(funnel, answers)];
+}
+
+// ---------------------------------------------------------------------------
 // Analytics-safe answer summaries
 // ---------------------------------------------------------------------------
 
-/** Coarse, order-preserving bucket label for a numeric answer. */
-export function numericBucket(step: NumberStep, value: number | null): string {
-  if (value === null) return 'unknown';
-  const min = step.min ?? 0;
-  const max = step.max ?? Math.max(min + 1, value);
-  if (max <= min) return 'all';
-  const bands = 5;
-  const width = (max - min) / bands;
-  const idx = Math.min(bands - 1, Math.max(0, Math.floor((value - min) / width)));
-  const lo = Math.round(min + idx * width);
-  const hi = Math.round(min + (idx + 1) * width);
-  return `${lo}-${hi}`;
-}
+export type AnswerKind = 'single_select' | 'multi_select' | 'number' | 'none';
 
-/**
- * Raw answers stay in their own table. What an `answer_submitted` event carries
- * is only config-defined, non-identifying metadata: which option ids were
- * chosen (they come from the config, not from the user) and, for free numeric
- * input, a coarse bucket rather than the exact figure.
- */
-export function summariseAnswer(step: Step, value: AnswerValue): Record<string, unknown> {
+export function answerKind(step: StepDef): AnswerKind {
   switch (step.type) {
-    case 'single_select':
-      return { answer_kind: 'single_select', option_id: value ?? null };
-    case 'multi_select': {
-      const ids = Array.isArray(value) ? value : [];
-      return { answer_kind: 'multi_select', option_ids: ids, option_count: ids.length };
-    }
-    case 'number':
-      return {
-        answer_kind: 'number',
-        bucket: numericBucket(step, typeof value === 'number' ? value : null),
-      };
-    default:
-      return { answer_kind: 'info' };
+    case 'single-select': return 'single_select';
+    case 'multi-select': return 'multi_select';
+    case 'number': return 'number';
+    default: return 'none';
   }
 }
 
+/**
+ * What an `answer_submitted` event is allowed to carry.
+ *
+ * The config sets `events.privacy.storeRawAnswers: false` and declares
+ * `answer_submitted` with exactly one property, `answer_kind`. So this returns
+ * the kind and nothing else — not the chosen option, not the number, not a
+ * bucket. Raw answers live only in the session store, which
+ * `session.persistAnswers: true` explicitly permits.
+ */
+export function summariseAnswer(step: StepDef): Record<string, unknown> {
+  return { answer_kind: answerKind(step) };
+}
+
 // ---------------------------------------------------------------------------
-// Config validation (used when publishing a version)
+// Config validation (run at publish time)
 // ---------------------------------------------------------------------------
 
 export interface ConfigIssue {
@@ -565,95 +659,143 @@ export interface ConfigIssue {
   message: string;
 }
 
+const VALID_TYPES: StepType[] = ['info', 'number', 'single-select', 'multi-select', 'result'];
+
 /**
- * Structural checks run at publish time. A version that fails with errors is
- * rejected, so a broken config can never become active and strand live traffic.
+ * Structural checks. A config with errors is refused at publish time, so a
+ * broken version can never become active and strand live traffic.
  */
 export function validateConfig(config: FunnelConfig): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
-  const push = (level: ConfigIssue['level'], message: string) => issues.push({ level, message });
+  const err = (m: string) => issues.push({ level: 'error', message: m });
+  const warn = (m: string) => issues.push({ level: 'warning', message: m });
 
-  if (!config?.key) push('error', 'config.key is required.');
-  if (!config?.name) push('error', 'config.name is required.');
-  if (!Array.isArray(config?.steps) || config.steps.length === 0) {
-    push('error', 'config.steps must be a non-empty array.');
+  if (!config?.funnelId) err('funnelId is required.');
+  if (!config?.title) warn('title is empty.');
+  if (config?.schemaVersion && config.schemaVersion !== '1.0') {
+    warn(`unknown schemaVersion "${config.schemaVersion}"; expected "1.0".`);
+  }
+
+  const steps = config?.steps;
+  if (!steps || typeof steps !== 'object' || Array.isArray(steps)) {
+    err('steps must be an object keyed by step id.');
     return issues;
   }
-  if (config.steps.length < 6) {
-    push('error', `config.steps must contain at least 6 screens (found ${config.steps.length}).`);
-  }
-  if (!config.result?.cta?.id) push('error', 'config.result.cta.id is required.');
 
-  const ids = new Set<string>();
-  for (const step of config.steps) {
-    if (!step.id) push('error', 'every step needs an id.');
-    if (ids.has(step.id)) push('error', `duplicate step id "${step.id}".`);
-    ids.add(step.id);
-    if (!['info', 'single_select', 'multi_select', 'number'].includes(step.type)) {
-      push('error', `step "${step.id}" has unsupported type "${step.type}".`);
+  const stepIds = Object.keys(steps);
+  if (stepIds.length < 6) {
+    err(`the funnel must define at least 6 screens (found ${stepIds.length}).`);
+  }
+
+  for (const [id, step] of Object.entries(steps)) {
+    if (step.id !== id) err(`step "${id}" has mismatched inner id "${step.id}".`);
+    if (!VALID_TYPES.includes(step.type)) {
+      err(`step "${id}" has unsupported type "${step.type}".`);
     }
-    if (step.type === 'single_select' || step.type === 'multi_select') {
-      const opts = (step as SelectStep).options;
-      if (!Array.isArray(opts) || opts.length === 0) {
-        push('error', `step "${step.id}" needs options.`);
-      } else if (new Set(opts.map((o) => o.id)).size !== opts.length) {
-        push('error', `step "${step.id}" has duplicate option ids.`);
+    if (step.type === 'single-select' || step.type === 'multi-select') {
+      const options = step.input?.options;
+      if (!Array.isArray(options) || options.length === 0) {
+        err(`step "${id}" needs input.options.`);
+      } else if (new Set(options.map((o) => o.value)).size !== options.length) {
+        err(`step "${id}" has duplicate option values.`);
+      }
+    }
+    if (step.type === 'number' && !step.input) {
+      err(`step "${id}" needs an input block.`);
+    }
+    if (step.type === 'multi-select') {
+      const { minSelections, maxSelections } = step.validation ?? {};
+      if (minSelections !== undefined && maxSelections !== undefined && minSelections > maxSelections) {
+        err(`step "${id}" has minSelections greater than maxSelections.`);
       }
     }
   }
 
-  // Every goto must resolve
+  // --- results -------------------------------------------------------------
+  const resultIds = new Set(Object.keys(config.results ?? {}));
+  if (resultIds.size === 0) err('results must define at least one result.');
+  if (!config.defaultResultId) err('defaultResultId is required.');
+  else if (!resultIds.has(config.defaultResultId)) {
+    err(`defaultResultId "${config.defaultResultId}" is not defined in results.`);
+  }
+  for (const rule of config.resultRules ?? []) {
+    if (!resultIds.has(rule.resultId)) {
+      err(`resultRules references unknown result "${rule.resultId}".`);
+    }
+  }
+  for (const [id, result] of Object.entries(config.results ?? {})) {
+    if (!result.cta?.label || !result.cta?.action) {
+      err(`result "${id}" needs a cta with a label and an action.`);
+    }
+  }
+
+  // --- experiment and per-variant sequences --------------------------------
+  const variants = Object.entries(config.experiment?.variants ?? {});
+  if (variants.length < 2) err('experiment.variants must define at least two variants.');
+  if (!config.experiment?.id) warn('experiment.id is empty.');
+  if (config.experiment?.assignment && config.experiment.assignment !== 'server') {
+    warn('experiment.assignment is not "server"; this runtime always assigns on the server.');
+  }
+
   let branchCount = 0;
-  for (const step of config.steps) {
-    const targets: string[] = [];
-    if (typeof step.next === 'string') targets.push(step.next);
-    else if (Array.isArray(step.next)) {
-      if (step.next.length > 1) branchCount += 1;
-      for (const rule of step.next) targets.push(rule.goto);
-      if (!step.next.some((r) => !r.when)) {
-        push(
-          'warning',
-          `step "${step.id}" has no default transition; unmatched answers end the funnel.`,
-        );
-      }
-    }
-    for (const t of targets) {
-      if (t !== RESULT && !ids.has(t)) {
-        push('error', `step "${step.id}" points at unknown step "${t}".`);
-      }
-    }
+  for (const step of Object.values(steps)) {
+    if (step.visibleWhen) branchCount += 1;
   }
-  if (branchCount < 1) push('error', 'config must contain at least one conditional branch.');
-
-  // Experiment sanity + per-variant resolution must stay reachable
-  const variants = Object.keys(config.experiment?.variants ?? {});
-  if (variants.length < 2) {
-    push('error', 'config.experiment.variants must define at least two variants.');
+  if (branchCount === 0 && (config.resultRules ?? []).length === 0) {
+    err('the config must contain at least one conditional branch (visibleWhen or resultRules).');
   }
-  if (!config.experiment?.hypothesis) push('warning', 'config.experiment.hypothesis is empty.');
-  if (!config.experiment?.primaryMetric) push('warning', 'config.experiment.primaryMetric is empty.');
 
-  for (const v of variants) {
-    const resolved = resolveVariantConfig(config, v);
-    if (resolved.steps.length === 0) {
-      push('error', `variant "${v}" resolves to zero steps.`);
+  for (const [key, variant] of variants) {
+    const sequence = variant.stepSequence ?? [];
+    if (sequence.length === 0) {
+      err(`variant "${key}" has an empty stepSequence.`);
       continue;
     }
-    const resolvedIds = new Set(resolved.steps.map((s) => s.id));
-    for (const step of resolved.steps) {
-      const targets: string[] = [];
-      if (typeof step.next === 'string') targets.push(step.next);
-      else if (Array.isArray(step.next)) for (const r of step.next) targets.push(r.goto);
-      for (const t of targets) {
-        if (t !== RESULT && !resolvedIds.has(t)) {
-          push('error', `variant "${v}": step "${step.id}" points at "${t}" which the variant removed.`);
+    const seen = new Set<string>();
+    for (const id of sequence) {
+      if (!steps[id]) err(`variant "${key}" sequences unknown step "${id}".`);
+      if (seen.has(id)) err(`variant "${key}" lists step "${id}" more than once.`);
+      seen.add(id);
+    }
+    if (!sequence.some((id) => steps[id]?.type === 'result')) {
+      err(`variant "${key}" has no result step in its sequence.`);
+    }
+
+    for (const id of Object.keys(variant.stepOverrides ?? {})) {
+      if (!steps[id]) warn(`variant "${key}" overrides unknown step "${id}".`);
+      else if (!seen.has(id)) warn(`variant "${key}" overrides step "${id}", which its sequence omits.`);
+    }
+    for (const id of Object.keys(variant.resultOverrides ?? {})) {
+      if (!resultIds.has(id)) warn(`variant "${key}" overrides unknown result "${id}".`);
+    }
+
+    // A visibleWhen must depend on an answer collected earlier in THIS
+    // variant's order, otherwise the predicate silently evaluates against an
+    // absent answer and the step vanishes for everyone.
+    const position = new Map(sequence.map((id, i) => [id, i]));
+    for (const id of sequence) {
+      const step = steps[id];
+      if (!step?.visibleWhen) continue;
+      for (const dep of conditionDependencies(step.visibleWhen)) {
+        const depPos = position.get(dep);
+        if (depPos === undefined) {
+          err(`variant "${key}": step "${id}" is gated on "${dep}", which the sequence never asks.`);
+        } else if (depPos >= position.get(id)!) {
+          err(`variant "${key}": step "${id}" is gated on "${dep}", which comes later in the sequence.`);
         }
       }
     }
   }
 
-  for (const e of config.extraEvents ?? []) {
-    if (!isValidEventType(e)) push('error', `extraEvents contains invalid event type "${e}".`);
+  // --- events --------------------------------------------------------------
+  for (const e of config.events?.allowed ?? []) {
+    if (!isValidEventName(e.name)) err(`events.allowed contains invalid event name "${e.name}".`);
+  }
+  const declared = new Set((config.events?.allowed ?? []).map((e) => e.name));
+  for (const core of CORE_EVENT_TYPES) {
+    if (declared.size > 0 && !declared.has(core)) {
+      warn(`events.allowed does not declare the core event "${core}".`);
+    }
   }
 
   return issues;

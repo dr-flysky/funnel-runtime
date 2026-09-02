@@ -48,7 +48,7 @@ export function assignVariant(
   if (total <= 0) return { variant: keys[0], source: 'assigned' };
 
   // 10_000 buckets keeps weighting precise to a basis point.
-  const bucket = hash32(`${config.experiment.key}:${sessionId}`) % 10_000;
+  const bucket = hash32(`${config.experiment.id}:${sessionId}`) % 10_000;
   const target = (bucket / 10_000) * total;
 
   let cumulative = 0;

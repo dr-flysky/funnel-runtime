@@ -2,27 +2,34 @@
  * Session lifecycle.
  *
  * The server is authoritative for navigation: it validates every answer and
- * decides the next step. The client renders what it is told. That is what
- * makes back / refresh / reopen safe — the browser holds no state that matters
- * beyond the session id.
+ * decides the next step. The client renders what it is told. That is what makes
+ * back / refresh / reopen safe — the browser holds nothing but a session id.
+ *
+ * Navigation follows the config's own model: the variant's `stepSequence`
+ * filtered by each step's `visibleWhen`. Because the visible path is recomputed
+ * from the current answers on every request, changing an earlier answer takes
+ * effect immediately — a step can appear or disappear without any bookkeeping.
  */
 import { randomUUID } from 'node:crypto';
 import { getDb, nowIso } from './db.ts';
 import { assignVariant } from './ab.ts';
 import { getActiveVersionRow, getVersionById, parseConfig } from './versions.ts';
 import {
-  RESULT,
   computeProgress,
   firstStepId,
   nextStepId,
-  resolveVariantConfig,
+  previousStepId,
+  resolveResultId,
+  resolveVariant,
   stepById,
   summariseAnswer,
   validateAnswer,
+  visibleSteps,
   type Answers,
   type AnswerValue,
-  type FunnelConfig,
   type Progress,
+  type ResolvedFunnel,
+  type ResultDef,
 } from '@shared/funnel';
 
 export interface Utm {
@@ -40,6 +47,7 @@ export interface SessionRow {
   version: number;
   variant: string;
   variant_source: string;
+  experiment_id: string | null;
   utm_source: string | null;
   utm_medium: string | null;
   utm_campaign: string | null;
@@ -49,30 +57,37 @@ export interface SessionRow {
   created_at: string;
 }
 
-export interface StateRow {
+interface StateRow {
   session_id: string;
-  current_step: string;
-  history_json: string;
+  current_step: string | null;
   completed: number;
+  result_id: string | null;
   updated_at: string;
 }
 
 export interface SessionView {
   sessionId: string;
-  funnelKey: string;
+  funnelId: string;
   version: number;
   versionId: number;
   variant: string;
   variantSource: string;
+  experimentId: string;
   /** Config already resolved for this session's variant. */
-  config: FunnelConfig;
-  currentStep: string;
-  history: string[];
+  funnel: ResolvedFunnel;
+  /** Ids of the steps this user will see, given their answers so far. */
+  visibleStepIds: string[];
+  currentStep: string | null;
+  currentStepType: string | null;
+  canGoBack: boolean;
   completed: boolean;
   progress: Progress;
   /** The user's own answers, returned so the UI can repopulate its inputs. */
   answers: Answers;
+  resultId: string | null;
+  result: ResultDef | null;
   utm: Utm;
+  expiresAt: string | null;
 }
 
 const UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
@@ -109,47 +124,80 @@ export function getAnswers(sessionId: string): Answers {
 }
 
 /** The exact config this session started on, resolved for its variant. */
-export function configForSession(session: SessionRow): FunnelConfig {
+export function funnelForSession(session: SessionRow): ResolvedFunnel {
   const row = getVersionById(session.version_id);
   if (!row) throw new Error(`Session ${session.session_id} references a missing version.`);
-  return resolveVariantConfig(parseConfig(row), session.variant);
+  return resolveVariant(parseConfig(row), session.variant);
 }
 
-function saveState(sessionId: string, currentStep: string, history: string[], completed: boolean) {
+/**
+ * `session.ttlHours` from the config. A session past its TTL is treated as
+ * gone rather than silently resumed, so a stale link starts cleanly on the
+ * currently active version.
+ */
+export function sessionExpiry(session: SessionRow, funnel: ResolvedFunnel): Date | null {
+  const hours = funnel.session?.ttlHours;
+  if (!hours || hours <= 0) return null;
+  return new Date(new Date(session.created_at).getTime() + hours * 3_600_000);
+}
+
+export function isExpired(session: SessionRow, funnel: ResolvedFunnel, now = new Date()): boolean {
+  const expiry = sessionExpiry(session, funnel);
+  return expiry !== null && now >= expiry;
+}
+
+function saveState(
+  sessionId: string,
+  currentStep: string | null,
+  completed: boolean,
+  resultId: string | null,
+): void {
   getDb()
     .prepare(
-      `INSERT INTO session_state (session_id, current_step, history_json, completed, updated_at)
+      `INSERT INTO session_state (session_id, current_step, completed, result_id, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          current_step = excluded.current_step,
-         history_json = excluded.history_json,
          completed    = excluded.completed,
+         result_id    = excluded.result_id,
          updated_at   = excluded.updated_at`,
     )
-    .run(sessionId, currentStep, JSON.stringify(history), completed ? 1 : 0, nowIso());
+    .run(sessionId, currentStep, completed ? 1 : 0, resultId, nowIso());
 }
 
 export function buildView(session: SessionRow): SessionView {
-  const config = configForSession(session);
+  const funnel = funnelForSession(session);
   const state = getState(session.session_id);
   const answers = getAnswers(session.session_id);
-  const currentStep = state?.current_step ?? firstStepId(config);
-  const history: string[] = state ? (JSON.parse(state.history_json) as string[]) : [];
+
+  const visible = visibleSteps(funnel, answers);
+  const currentStep = state?.current_step ?? firstStepId(funnel, answers);
+  const step = currentStep ? stepById(funnel, currentStep) : undefined;
   const completed = state ? state.completed === 1 : false;
+
+  // The result is derived from the answers, never stored as the source of
+  // truth, so it stays consistent if an answer is edited on the way back.
+  const onResultScreen = step?.type === 'result' || completed;
+  const resultId = onResultScreen ? resolveResultId(funnel, answers) : null;
 
   return {
     sessionId: session.session_id,
-    funnelKey: session.funnel_key,
+    funnelId: funnel.funnelId,
     version: session.version,
     versionId: session.version_id,
     variant: session.variant,
     variantSource: session.variant_source,
-    config,
+    experimentId: funnel.experimentId,
+    funnel,
+    visibleStepIds: visible.map((s) => s.id),
     currentStep,
-    history,
+    currentStepType: step?.type ?? null,
+    canGoBack: currentStep ? previousStepId(funnel, currentStep, answers) !== null : false,
     completed,
-    progress: computeProgress(config, currentStep, answers, history),
+    progress: computeProgress(funnel, currentStep, answers),
     answers,
+    resultId,
+    result: resultId ? (funnel.results[resultId] ?? null) : null,
     utm: {
       utm_source: session.utm_source,
       utm_medium: session.utm_medium,
@@ -157,13 +205,14 @@ export function buildView(session: SessionRow): SessionView {
       utm_content: session.utm_content,
       utm_term: session.utm_term,
     },
+    expiresAt: sessionExpiry(session, funnel)?.toISOString() ?? null,
   };
 }
 
 export class NoActiveVersionError extends Error {}
 
 /**
- * Start a session on the currently active version and pin both the version and
+ * Start a session on the currently active version, pinning both the version and
  * the variant onto the session row. This is the only place the active pointer
  * is read for a user-facing session.
  */
@@ -177,17 +226,17 @@ export function createSession(opts: {
   const activeRow = getActiveVersionRow(opts.funnelKey);
   if (!activeRow) throw new NoActiveVersionError(`No active version for funnel "${opts.funnelKey}".`);
 
-  const baseConfig = parseConfig(activeRow);
+  const config = parseConfig(activeRow);
   const sessionId = opts.sessionId ?? randomUUID();
-  const { variant, source } = assignVariant(baseConfig, sessionId, opts.variantOverride ?? null);
+  const { variant, source } = assignVariant(config, sessionId, opts.variantOverride ?? null);
   const utm = opts.utm ?? {};
 
   getDb()
     .prepare(
       `INSERT INTO sessions (
-         session_id, funnel_key, version_id, version, variant, variant_source,
+         session_id, funnel_key, version_id, version, variant, variant_source, experiment_id,
          utm_source, utm_medium, utm_campaign, utm_content, utm_term, synthetic, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sessionId,
@@ -196,6 +245,7 @@ export function createSession(opts: {
       activeRow.version,
       variant,
       source,
+      config.experiment?.id ?? null,
       utm.utm_source ?? null,
       utm.utm_medium ?? null,
       utm.utm_campaign ?? null,
@@ -205,8 +255,8 @@ export function createSession(opts: {
       nowIso(),
     );
 
-  const resolved = resolveVariantConfig(baseConfig, variant);
-  saveState(sessionId, firstStepId(resolved), [], false);
+  const funnel = resolveVariant(config, variant);
+  saveState(sessionId, firstStepId(funnel, {}), false, null);
 
   return buildView(getSession(sessionId)!);
 }
@@ -215,88 +265,102 @@ export interface AdvanceResult {
   ok: boolean;
   error?: string;
   view?: SessionView;
-  /** Sanitised metadata the caller should attach to an `answer_submitted` event. */
+  /** Sanitised metadata for the `answer_submitted` event: the kind, nothing more. */
   answerSummary?: Record<string, unknown>;
-  previousStep?: string;
+  /** For the `step_completed` event. */
+  nextStepId?: string | null;
+  /** For the `back_clicked` event. */
+  destinationStepId?: string | null;
   reachedResult?: boolean;
 }
 
 /**
- * Validate an answer, persist it, and advance to the next step.
+ * Validate an answer, persist it, and advance to the next visible step.
  *
- * Re-submitting the step the user is already on is treated as an edit: the
- * answer is overwritten and the branch recomputed. Submitting a step that is
- * not the current one is rejected, so a stale tab cannot corrupt the path.
+ * Submitting a step other than the current one is rejected, so a stale tab
+ * cannot corrupt the path. Re-submitting the current step is an edit: the
+ * answer is overwritten and the visible path recomputed, which may reveal or
+ * hide steps further along.
  */
 export function submitAnswer(sessionId: string, stepId: string, value: unknown): AdvanceResult {
   const session = getSession(sessionId);
   if (!session) return { ok: false, error: 'Unknown session.' };
 
-  const config = configForSession(session);
+  const funnel = funnelForSession(session);
+  if (isExpired(session, funnel)) return { ok: false, error: 'Session expired.' };
+
   const state = getState(sessionId);
-  const currentStep = state?.current_step ?? firstStepId(config);
-  if (currentStep === RESULT) return { ok: false, error: 'Funnel already completed.' };
+  const currentStep = state?.current_step ?? firstStepId(funnel, getAnswers(sessionId));
+  if (currentStep === null) return { ok: false, error: 'Funnel already completed.' };
   if (stepId !== currentStep) {
     return { ok: false, error: `Step "${stepId}" is not the current step ("${currentStep}").` };
   }
 
-  const step = stepById(config, stepId);
+  const step = stepById(funnel, stepId);
   if (!step) return { ok: false, error: `Unknown step "${stepId}".` };
+  if (step.type === 'result') return { ok: false, error: 'Funnel already completed.' };
 
   const validation = validateAnswer(step, value);
   if (!validation.ok) return { ok: false, error: validation.error };
 
-  const stored = validation.value ?? null;
-  getDb()
-    .prepare(
-      `INSERT INTO session_answers (session_id, step_id, value_json, updated_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(session_id, step_id) DO UPDATE SET
-         value_json = excluded.value_json, updated_at = excluded.updated_at`,
-    )
-    .run(sessionId, stepId, JSON.stringify(stored), nowIso());
+  // Info screens carry no answer, so nothing is written for them.
+  if (step.type !== 'info') {
+    const stored = validation.value ?? null;
+    getDb()
+      .prepare(
+        `INSERT INTO session_answers (session_id, step_id, value_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id, step_id) DO UPDATE SET
+           value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, stepId, JSON.stringify(stored), nowIso());
+  }
 
   const answers = getAnswers(sessionId);
-  const next = nextStepId(config, stepId, answers);
-  const history: string[] = state ? (JSON.parse(state.history_json) as string[]) : [];
-  const newHistory = [...history.filter((h) => h !== stepId), stepId];
-  const completed = next === RESULT;
-  saveState(sessionId, next, newHistory, completed);
+  const next = nextStepId(funnel, stepId, answers);
+  const nextStep = next ? stepById(funnel, next) : undefined;
+  const reachedResult = nextStep?.type === 'result' || next === null;
+  const resultId = reachedResult ? resolveResultId(funnel, answers) : null;
+
+  // Reaching the result screen is completion; `next === null` only happens if a
+  // variant ends without one, which config validation already refuses.
+  saveState(sessionId, next, reachedResult, resultId);
 
   return {
     ok: true,
     view: buildView(session),
-    answerSummary: summariseAnswer(step, stored),
-    previousStep: stepId,
-    reachedResult: completed,
+    answerSummary: summariseAnswer(step),
+    nextStepId: next,
+    reachedResult,
   };
 }
 
 /**
  * Step back one screen.
  *
- * We pop the history rather than recomputing backwards, because with
- * conditional branches the reverse edge is not unique — history is the only
- * honest record of where the user actually came from.
+ * The previous step is computed from the visible path rather than from a stored
+ * history stack: with a linear sequence plus visibility predicates the backward
+ * edge is unambiguous, so there is no history to keep in sync.
  */
 export function goBack(sessionId: string): AdvanceResult {
   const session = getSession(sessionId);
   if (!session) return { ok: false, error: 'Unknown session.' };
 
+  const funnel = funnelForSession(session);
+  if (isExpired(session, funnel)) return { ok: false, error: 'Session expired.' };
+
+  const answers = getAnswers(sessionId);
   const state = getState(sessionId);
-  if (!state) return { ok: false, error: 'Session has no state.' };
+  const currentStep = state?.current_step;
 
-  const history: string[] = JSON.parse(state.history_json) as string[];
-  if (history.length === 0) return { ok: false, error: 'Already at the first step.' };
+  // From the result screen, Back returns to the last visible question.
+  const visible = visibleSteps(funnel, answers);
+  const target = currentStep
+    ? previousStepId(funnel, currentStep, answers)
+    : (visible[visible.length - 1]?.id ?? null);
 
-  const target = history[history.length - 1];
-  const newHistory = history.slice(0, -1);
-  saveState(sessionId, target, newHistory, false);
+  if (target === null) return { ok: false, error: 'Already at the first step.' };
 
-  return { ok: true, view: buildView(session), previousStep: state.current_step };
-}
-
-/** Mark an info step as seen and move on; info screens carry no answer. */
-export function continueFromInfo(sessionId: string, stepId: string): AdvanceResult {
-  return submitAnswer(sessionId, stepId, null);
+  saveState(sessionId, target, false, null);
+  return { ok: true, view: buildView(session), destinationStepId: target };
 }

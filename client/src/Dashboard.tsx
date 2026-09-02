@@ -39,7 +39,15 @@ interface Report {
   campaigns: string[];
   versions: number[];
   variants: string[];
-  experiment: { key: string; hypothesis: string; primaryMetric: string } | null;
+  experiment: { id: string; variants: string[]; assignment: string } | null;
+  results: {
+    resultId: string;
+    title: string;
+    sessions: number;
+    share: number;
+    ctaSessions: number;
+    ctaRate: number;
+  }[];
 }
 
 export default function Dashboard({ funnelKey }: { funnelKey: string }) {
@@ -138,9 +146,15 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
 
       {report.experiment && (
         <section className="panel">
-          <h2>Experiment · {report.experiment.key}</h2>
-          <p className="muted small">{report.experiment.hypothesis}</p>
-          <p className="muted small"><strong>Primary metric:</strong> {report.experiment.primaryMetric}</p>
+          <h2>Experiment · {report.experiment.id}</h2>
+          <p className="muted small">
+            Variant B reorders the questions and reframes the result copy. Assignment is
+            server-side and sticky for the life of a session.
+          </p>
+          <p className="muted small">
+            <strong>Primary metric:</strong> cta_click_rate — unique sessions with{' '}
+            <code>cta_clicked</code> divided by unique sessions with <code>session_started</code>.
+          </p>
 
           <div className="compare">
             {report.byVariant.map((v) => (
@@ -212,6 +226,49 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
           </table>
         </div>
       </section>
+
+      {report.results.length > 0 && (
+        <section className="panel">
+          <h2>Recommendations reached</h2>
+          <p className="muted small">
+            Which result each session landed on, chosen by <code>resultRules</code> in config
+            order with <code>defaultResultId</code> as the fallback.
+          </p>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Result</th>
+                  <th className="num">Sessions</th>
+                  <th className="num">Share</th>
+                  <th className="num">CTA clicks</th>
+                  <th className="num">CTA rate</th>
+                  <th>Share</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.results.map((r) => (
+                  <tr key={r.resultId}>
+                    <td>
+                      <strong>{r.title}</strong>
+                      <div className="muted small"><code>{r.resultId}</code></div>
+                    </td>
+                    <td className="num">{r.sessions}</td>
+                    <td className="num">{pct(r.share)}</td>
+                    <td className="num">{r.ctaSessions}</td>
+                    <td className="num">{pct(r.ctaRate)}</td>
+                    <td className="bar-cell">
+                      <div className="bar">
+                        <div className="bar-fill" style={{ width: `${r.share * 100}%` }} />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="panel">
         <h2>Version comparison</h2>

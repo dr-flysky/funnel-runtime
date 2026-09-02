@@ -10,3 +10,7 @@ data/
 
 # The task brief itself is not part of the deliverable.
 Funnel_Runtime_Fullstack_Dev.pdf
+
+# scratch files
+smoke.ts
+scratch-*.ts

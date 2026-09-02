@@ -7,21 +7,24 @@
  *
  * It deliberately produces the messy traffic the brief asks for:
  *   - both variants and several UTM campaigns
- *   - every branch of the funnel, including the low-income and business paths
+ *   - every branch, including the hidden office_days step and all four results
  *   - drop-off spread across different steps
  *   - repeated step views after Back
  *   - whole batches resent after a simulated timeout
  *   - events that arrive out of order
  *   - a few malformed events mixed into otherwise-valid batches
  *
- * Usage: npm run generate:traffic -- [sessions] [--seed=42] [--funnel=quickcash]
+ * Events carry exactly the properties the config declares for them, so the
+ * generated data matches what the real client emits.
+ *
+ * Usage: npm run generate:traffic -- [sessions] [--seed=42] [--funnel=id]
  */
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../server/app.ts';
 import { getDb } from '../server/db.ts';
 import { getActiveVersionRow } from '../server/versions.ts';
-import { RESULT, type FunnelConfig, type Step } from '@shared/funnel';
+import type { ResolvedFunnel, StepDef } from '@shared/funnel';
 
 // ---------------------------------------------------------------------------
 // Deterministic randomness — same seed, same traffic.
@@ -45,8 +48,8 @@ const flag = (name: string, fallback: string): string => {
 };
 
 const SESSION_COUNT = Number(positional[0] ?? flag('sessions', '140'));
-const SEED = Number(flag('seed', '20260902'));
-const FUNNEL_KEY = flag('funnel', process.env.DEFAULT_FUNNEL_KEY ?? 'quickcash');
+const SEED = Number(flag('seed', '20260903'));
+const FUNNEL_KEY = flag('funnel', process.env.DEFAULT_FUNNEL_KEY ?? 'workstyle-planner');
 
 const rnd = mulberry32(SEED);
 const pick = <T>(arr: T[]): T => arr[Math.floor(rnd() * arr.length)];
@@ -54,10 +57,10 @@ const chance = (p: number): boolean => rnd() < p;
 
 const CAMPAIGNS = [
   { utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'brand_search', utm_content: 'headline_a' },
-  { utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'debt_generic', utm_content: 'headline_b' },
-  { utm_source: 'facebook', utm_medium: 'paid_social', utm_campaign: 'lookalike_q3', utm_content: 'video_15s' },
+  { utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'remote_work_generic', utm_content: 'headline_b' },
+  { utm_source: 'linkedin', utm_medium: 'paid_social', utm_campaign: 'managers_q3', utm_content: 'carousel' },
   { utm_source: 'newsletter', utm_medium: 'email', utm_campaign: 'winback_sep', utm_content: 'plain_text' },
-  { utm_source: 'reddit', utm_medium: 'paid_social', utm_campaign: 'personalfinance', utm_content: 'carousel' },
+  { utm_source: 'reddit', utm_medium: 'paid_social', utm_campaign: 'r_managers', utm_content: 'video_15s' },
   { utm_source: 'organic', utm_medium: 'referral', utm_campaign: 'comparison_site', utm_content: 'listing' },
 ];
 
@@ -106,39 +109,55 @@ class SessionBuffer {
 // ---------------------------------------------------------------------------
 
 /**
- * Pick a plausible answer. Numeric steps are skewed low ~30% of the time so
- * the low-income branch gets real traffic rather than a rounding error.
+ * Pick a plausible answer. `work_mode` is skewed so all three branches — and
+ * therefore the hidden office_days step and every result rule — get real
+ * traffic rather than a rounding error.
  */
-function synthesiseAnswer(step: Step): unknown {
+function synthesiseAnswer(step: StepDef): unknown {
   switch (step.type) {
     case 'info':
+    case 'result':
       return null;
-    case 'single_select':
-      return pick(step.options).id;
-    case 'multi_select': {
-      const max = Math.min(step.maxSelected ?? 2, step.options.length);
-      const min = Math.max(step.minSelected ?? 1, 1);
+
+    case 'single-select': {
+      const options = step.input?.options ?? [];
+      if (options.length === 0) return null;
+      return pick(options).value;
+    }
+
+    case 'multi-select': {
+      const options = step.input?.options ?? [];
+      const min = Math.max(step.validation?.minSelections ?? 1, 1);
+      const max = Math.min(step.validation?.maxSelections ?? options.length, options.length);
       const count = min + Math.floor(rnd() * (max - min + 1));
-      const shuffled = [...step.options].sort(() => rnd() - 0.5);
-      return shuffled.slice(0, count).map((o) => o.id);
+      const shuffled = [...options].sort(() => rnd() - 0.5);
+      return shuffled.slice(0, count).map((o) => o.value);
     }
+
     case 'number': {
-      const min = step.min ?? 0;
-      const max = step.max ?? min + 1000;
-      const lowBand = chance(0.3);
-      const lo = min;
-      const hi = lowBand ? min + (max - min) * 0.18 : max;
-      const raw = lo + rnd() * (hi - lo);
-      const stepSize = step.step ?? 1;
-      return Math.round(raw / stepSize) * stepSize;
+      const min = step.input?.min ?? 0;
+      const max = step.input?.max ?? min + 100;
+      // Cluster toward realistic small teams / low office days.
+      const skewed = chance(0.65) ? min + (max - min) * rnd() * 0.35 : min + rnd() * (max - min);
+      const increment = step.input?.step ?? 1;
+      const value = Math.round(skewed / increment) * increment;
+      return Math.min(max, Math.max(min, value));
     }
+
     default:
       return null;
   }
 }
 
+/** Later steps are stickier; free numeric entry bleeds the most users. */
+function dropOffProbability(step: StepDef, depth: number): number {
+  const base = step.type === 'number' ? 0.14 : step.type === 'multi-select' ? 0.1 : 0.07;
+  const fatigue = Math.max(0, 0.05 - depth * 0.005);
+  return Math.min(0.4, base + fatigue);
+}
+
 // ---------------------------------------------------------------------------
-// HTTP helpers
+// HTTP helper
 // ---------------------------------------------------------------------------
 
 async function postJson(base: string, path: string, body: unknown): Promise<any> {
@@ -164,7 +183,8 @@ interface Stats {
   backs: number;
   dropOffs: Record<string, number>;
   variants: Record<string, number>;
-  branchHits: Record<string, number>;
+  stepHits: Record<string, number>;
+  results: Record<string, number>;
 }
 
 async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]): Promise<void> {
@@ -177,30 +197,46 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
   if (!created.sessionId) throw new Error(`session creation failed: ${JSON.stringify(created)}`);
 
   const buf = new SessionBuffer(created.sessionId);
-  const config = created.config as FunnelConfig;
+  const funnel = created.funnel as ResolvedFunnel;
+  const stepOf = (id: string | null): StepDef | undefined =>
+    id ? funnel.steps.find((s) => s.id === id) : undefined;
+
   stats.sessions += 1;
   stats.variants[created.variant] = (stats.variants[created.variant] ?? 0) + 1;
+  buf.emit('session_started');
 
-  buf.emit('session_started', null, { variant: created.variant, version: created.version });
-
-  let currentStep: string = created.currentStep;
+  let view = created;
   let guard = 0;
-  const extraEvents = config.extraEvents ?? [];
 
-  while (currentStep !== RESULT && guard < 40) {
+  while (view.currentStep && guard < 40) {
     guard += 1;
-    const step = config.steps.find((s) => s.id === currentStep);
+    const step = stepOf(view.currentStep);
     if (!step) break;
 
-    stats.branchHits[step.id] = (stats.branchHits[step.id] ?? 0) + 1;
-    buf.emit('step_viewed', step.id);
+    if (step.type === 'result') {
+      stats.completed += 1;
+      const resultId = view.resultId;
+      stats.results[resultId] = (stats.results[resultId] ?? 0) + 1;
 
-    // A version that declares extra event types gets them exercised.
-    if (extraEvents.length > 0 && step.help && chance(0.12)) {
-      buf.emit(pick(extraEvents), step.id, { surface: 'inline_help' });
+      buf.emit('result_viewed', step.id, { result_id: resultId });
+      // A refresh of the result screen must not double-count anything.
+      if (chance(0.25)) buf.emit('result_viewed', step.id, { result_id: resultId });
+      if (chance(0.42)) {
+        stats.ctaClicks += 1;
+        const action = view.result?.cta?.action ?? 'expand_recommendation';
+        buf.emit('cta_clicked', step.id, { result_id: resultId, action });
+        if (chance(0.1)) buf.emit('cta_clicked', step.id, { result_id: resultId, action });
+      }
+      break;
     }
 
-    // Abandon here?
+    stats.stepHits[step.id] = (stats.stepHits[step.id] ?? 0) + 1;
+    buf.emit('step_viewed', step.id, {
+      step_type: step.type,
+      visible_step_index: view.progress.visibleIndex,
+      visible_step_count: view.progress.visibleCount,
+    });
+
     if (chance(dropOffProbability(step, guard))) {
       stats.dropOffs[step.id] = (stats.dropOffs[step.id] ?? 0) + 1;
       allEvents.push(buf.events);
@@ -209,64 +245,35 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
 
     // Some users step back, re-read the previous screen, then come forward
     // again — this is what produces repeat step_viewed events.
-    if (guard > 1 && chance(0.18)) {
+    if (view.canGoBack && chance(0.18)) {
       const back = await postJson(base, `/api/session/${created.sessionId}/back`, {});
       if (back.currentStep) {
-        buf.emit('back_clicked', step.id, { to: back.currentStep });
+        buf.emit('back_clicked', step.id, { destination_step_id: back.currentStep });
         stats.backs += 1;
-        buf.emit('step_viewed', back.currentStep);
-        const prevStep = config.steps.find((s) => s.id === back.currentStep);
-        if (prevStep) {
-          const replay = await postJson(base, `/api/session/${created.sessionId}/answer`, {
-            stepId: prevStep.id,
-            value: synthesiseAnswer(prevStep),
-          });
-          buf.emit('answer_submitted', prevStep.id, replay.answerSummary ?? {});
-          buf.emit('step_completed', prevStep.id);
-          currentStep = replay.currentStep;
-          continue;
-        }
+        view = back;
+        continue;
       }
     }
 
-    const value = synthesiseAnswer(step);
     const answered = await postJson(base, `/api/session/${created.sessionId}/answer`, {
       stepId: step.id,
-      value,
+      value: synthesiseAnswer(step),
     });
 
     if (answered.status >= 400) {
-      // Validation refused it — treat as an abandon rather than looping.
       stats.dropOffs[step.id] = (stats.dropOffs[step.id] ?? 0) + 1;
       allEvents.push(buf.events);
       return;
     }
 
-    buf.emit('answer_submitted', step.id, answered.answerSummary ?? {});
-    buf.emit('step_completed', step.id);
-    currentStep = answered.currentStep;
-  }
-
-  if (currentStep === RESULT) {
-    stats.completed += 1;
-    buf.emit('result_viewed', config.result.id, { result_id: config.result.id });
-    // Re-viewing the result (refresh) must not double-count anything.
-    if (chance(0.25)) buf.emit('result_viewed', config.result.id, { refresh: true });
-    if (chance(0.42)) {
-      stats.ctaClicks += 1;
-      buf.emit('cta_clicked', config.result.id, { cta_id: config.result.cta.id });
-      if (chance(0.1)) buf.emit('cta_clicked', config.result.id, { cta_id: config.result.cta.id });
+    if (step.type !== 'info') {
+      buf.emit('answer_submitted', step.id, answered.answerSummary ?? {});
     }
+    buf.emit('step_completed', step.id, { next_step_id: answered.currentStep ?? null });
+    view = answered;
   }
 
   allEvents.push(buf.events);
-}
-
-/** Later steps are stickier; numeric questions bleed the most users. */
-function dropOffProbability(step: Step, depth: number): number {
-  const base = step.type === 'number' ? 0.16 : step.type === 'multi_select' ? 0.1 : 0.08;
-  const fatigue = Math.max(0, 0.05 - depth * 0.005);
-  return Math.min(0.4, base + fatigue);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +286,13 @@ interface Delivery {
   accepted: number;
   duplicates: number;
   rejected: number;
+  reordered: number;
 }
 
 async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Delivery> {
-  const stats: Delivery = { batchesSent: 0, eventsSent: 0, accepted: 0, duplicates: 0, rejected: 0 };
+  const stats: Delivery = {
+    batchesSent: 0, eventsSent: 0, accepted: 0, duplicates: 0, rejected: 0, reordered: 0,
+  };
 
   // Interleave sessions the way concurrent users would arrive.
   const queue: QueuedEvent[] = [];
@@ -299,11 +309,10 @@ async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Deliv
   }
 
   // Swap adjacent pairs so a slice of traffic genuinely arrives out of order.
-  let swaps = 0;
   for (let i = 1; i < queue.length; i += 1) {
     if (chance(0.06)) {
       [queue[i - 1], queue[i]] = [queue[i], queue[i - 1]];
-      swaps += 1;
+      stats.reordered += 1;
     }
   }
 
@@ -329,7 +338,7 @@ async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Deliv
       });
     }
     if (chance(0.08)) {
-      batch.push({ event_id: randomUUID(), session_id: queue[i]?.session_id, type: 'NOT a valid type' });
+      batch.push({ event_id: randomUUID(), session_id: queue[i]?.session_id, type: 'NOT a valid name' });
     }
 
     await send(batch);
@@ -338,7 +347,6 @@ async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Deliv
     if (chance(0.15)) await send(batch);
   }
 
-  console.log(`  reordered ${swaps} adjacent event pairs before sending`);
   return stats;
 }
 
@@ -357,11 +365,13 @@ async function main(): Promise<void> {
   await new Promise<void>((resolve) => server.once('listening', () => resolve()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  console.log(`Generating ${SESSION_COUNT} sessions for "${FUNNEL_KEY}" (active v${active.version}, seed ${SEED})`);
+  console.log(
+    `Generating ${SESSION_COUNT} sessions for "${FUNNEL_KEY}" (active v${active.version}, seed ${SEED})`,
+  );
 
   const stats: Stats = {
     sessions: 0, completed: 0, ctaClicks: 0, backs: 0,
-    dropOffs: {}, variants: {}, branchHits: {},
+    dropOffs: {}, variants: {}, stepHits: {}, results: {},
   };
   const perSession: QueuedEvent[][] = [];
 
@@ -372,23 +382,27 @@ async function main(): Promise<void> {
 
   console.log('\nDelivering events:');
   const delivery = await deliver(base, perSession);
-
   server.close();
+
+  const fmt = (o: Record<string, number>) =>
+    Object.entries(o).map(([k, v]) => `${k}:${v}`).join('  ') || '—';
 
   console.log('\n--- Traffic summary -------------------------------------');
   console.log(`sessions            ${stats.sessions}`);
-  console.log(`  variants          ${Object.entries(stats.variants).map(([k, v]) => `${k}:${v}`).join('  ')}`);
+  console.log(`  variants          ${fmt(stats.variants)}`);
   console.log(`  reached result    ${stats.completed}`);
   console.log(`  clicked CTA       ${stats.ctaClicks}`);
   console.log(`  pressed Back      ${stats.backs}`);
-  console.log(`steps entered       ${Object.entries(stats.branchHits).map(([k, v]) => `${k}:${v}`).join('  ')}`);
-  console.log(`drop-off by step    ${Object.entries(stats.dropOffs).map(([k, v]) => `${k}:${v}`).join('  ')}`);
+  console.log(`results             ${fmt(stats.results)}`);
+  console.log(`steps entered       ${fmt(stats.stepHits)}`);
+  console.log(`drop-off by step    ${fmt(stats.dropOffs)}`);
   console.log('--- Delivery --------------------------------------------');
   console.log(`batches sent        ${delivery.batchesSent}`);
   console.log(`events sent         ${delivery.eventsSent}`);
   console.log(`  accepted          ${delivery.accepted}`);
-  console.log(`  duplicates dropped${String(delivery.duplicates).padStart(4)}  (retried batches)`);
+  console.log(`  duplicates        ${delivery.duplicates}  (retried batches, suppressed)`);
   console.log(`  rejected          ${delivery.rejected}  (malformed, siblings still stored)`);
+  console.log(`  reordered pairs   ${delivery.reordered}`);
   console.log('---------------------------------------------------------');
   console.log('\nOpen /dashboard to see the aggregates.');
 }

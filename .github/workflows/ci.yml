@@ -16,3 +16,5 @@ jobs:
       - run: npm run build
       # The generator is the integration test: it drives the real HTTP API.
       - run: npm run seed && npm run generate:traffic -- 60
+      # Publish/rollback must survive a real cycle, not just unit tests.
+      - run: npm run publish -- configs/funnel-v2.example.json && npm run rollback

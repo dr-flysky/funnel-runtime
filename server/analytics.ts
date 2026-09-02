@@ -18,7 +18,7 @@
  *     meaningless when users take different paths.
  */
 import { getDb } from './db.ts';
-import { CORE_EVENT_TYPES, type FunnelConfig } from '@shared/funnel';
+import { CORE_EVENT_TYPES, type FunnelConfig, type StepType } from '@shared/funnel';
 import { getVersion, getActiveVersionRow, parseConfig } from './versions.ts';
 
 export interface AnalyticsFilters {
@@ -97,7 +97,18 @@ export interface AnalyticsReport {
   campaigns: string[];
   versions: number[];
   variants: string[];
-  experiment: { key: string; hypothesis: string; primaryMetric: string } | null;
+  experiment: { id: string; variants: string[]; assignment: string } | null;
+  /** Which recommendation people ended up with, by unique session. */
+  results: ResultBreakdown[];
+}
+
+export interface ResultBreakdown {
+  resultId: string;
+  title: string;
+  sessions: number;
+  share: number;
+  ctaSessions: number;
+  ctaRate: number;
 }
 
 interface Where {
@@ -146,46 +157,54 @@ function distinctSessions(f: AnalyticsFilters, type: string): number {
   return row.n;
 }
 
-/** Ids of the result screen across every known version of this funnel. */
-function resultScreenIds(funnelKey: string): Set<string> {
+/** Ids of steps whose type is `result` — measured separately, not as steps. */
+function resultStepIds(funnelKey: string): Set<string> {
   const ids = new Set<string>();
-  for (const v of listVersionNumbers(funnelKey)) {
-    const row = getVersion(funnelKey, v);
-    if (row) ids.add(parseConfig(row).result?.id ?? 'result');
+  for (const cfg of configsFor(funnelKey)) {
+    for (const [id, step] of Object.entries(cfg.steps ?? {})) {
+      if (step.type === 'result') ids.add(id);
+    }
   }
-  const active = getActiveVersionRow(funnelKey);
-  if (active) ids.add(parseConfig(active).result?.id ?? 'result');
   return ids;
+}
+
+function configsFor(funnelKey: string, version?: number | null): FunnelConfig[] {
+  const versions = version != null ? [version] : listVersionNumbers(funnelKey);
+  const out: FunnelConfig[] = [];
+  for (const v of [...versions].sort((a, b) => b - a)) {
+    const row = getVersion(funnelKey, v);
+    if (row) out.push(parseConfig(row));
+  }
+  if (out.length === 0) {
+    const active = getActiveVersionRow(funnelKey);
+    if (active) out.push(parseConfig(active));
+  }
+  return out;
 }
 
 /**
  * Canonical step order for the versions in scope.
  *
- * When several versions are compared we merge their orders: the newest version
- * supplies the backbone, and steps that only exist in older versions are
- * appended so their historical numbers stay visible rather than vanishing.
+ * Variants order their steps differently, so there is no single true order. We
+ * take the first variant's sequence as the backbone and append anything only
+ * other variants or older versions ask, so no step's numbers ever vanish.
  */
-function stepOrderFor(f: AnalyticsFilters): { id: string; title: string }[] {
-  const versions = f.version != null ? [f.version] : listVersionNumbers(f.funnelKey);
-  const configs: FunnelConfig[] = [];
-
-  for (const v of [...versions].sort((a, b) => b - a)) {
-    const row = getVersion(f.funnelKey, v);
-    if (row) configs.push(parseConfig(row));
-  }
-  if (configs.length === 0) {
-    const active = getActiveVersionRow(f.funnelKey);
-    if (active) configs.push(parseConfig(active));
-  }
-
-  const ordered: { id: string; title: string }[] = [];
+function stepOrderFor(f: AnalyticsFilters): { id: string; title: string; type: StepType }[] {
+  const ordered: { id: string; title: string; type: StepType }[] = [];
   const seen = new Set<string>();
-  for (const cfg of configs) {
-    for (const step of cfg.steps) {
-      if (!seen.has(step.id)) {
-        seen.add(step.id);
-        ordered.push({ id: step.id, title: step.title });
-      }
+
+  for (const cfg of configsFor(f.funnelKey, f.version)) {
+    const variants = Object.values(cfg.experiment?.variants ?? {});
+    const sequences = f.variant && cfg.experiment?.variants?.[f.variant]
+      ? [cfg.experiment.variants[f.variant].stepSequence ?? []]
+      : variants.map((v) => v.stepSequence ?? []);
+
+    const ids = [...sequences.flat(), ...Object.keys(cfg.steps ?? {})];
+    for (const id of ids) {
+      const step = cfg.steps?.[id];
+      if (!step || seen.has(id)) continue;
+      seen.add(id);
+      ordered.push({ id, title: step.content?.title ?? id, type: step.type });
     }
   }
   return ordered;
@@ -229,8 +248,8 @@ function stepMetrics(f: AnalyticsFilters, startedSessions: number): StepMetrics[
   const byId = new Map(rows.map((r) => [r.step_id, r]));
 
   // The result screen carries a step_id on result_viewed / cta_clicked but is
-  // not a funnel step — it has its own metrics on the segment.
-  const resultIds = resultScreenIds(f.funnelKey);
+  // not a question — it has its own metrics on the segment.
+  const resultIds = resultStepIds(f.funnelKey);
 
   // Steps present in the data but not in any known config still get reported,
   // so a config that was edited outside the app cannot silently hide traffic.
@@ -239,7 +258,7 @@ function stepMetrics(f: AnalyticsFilters, startedSessions: number): StepMetrics[
   );
   const allSteps = [
     ...order.filter((o) => !resultIds.has(o.id)),
-    ...extras.map((r) => ({ id: r.step_id, title: r.step_id })),
+    ...extras.map((r) => ({ id: r.step_id, title: r.step_id, type: 'info' as StepType })),
   ];
 
   return allSteps.map(({ id, title }) => {
@@ -351,6 +370,42 @@ function customEvents(f: AnalyticsFilters): CustomEventMetric[] {
   return rows;
 }
 
+/**
+ * Result distribution, read from the `result_id` property the config declares
+ * on `result_viewed` and `cta_clicked`. Counted by unique session, so a refresh
+ * of the result screen does not inflate a recommendation's share.
+ */
+function resultBreakdown(f: AnalyticsFilters, total: number): ResultBreakdown[] {
+  const w = buildWhere(f, [`e.type IN ('result_viewed', 'cta_clicked')`]);
+  const rows = getDb()
+    .prepare(
+      `SELECT json_extract(e.props_json, '$.result_id') AS result_id,
+              COUNT(DISTINCT CASE WHEN e.type = 'result_viewed' THEN e.session_id END) AS sessions,
+              COUNT(DISTINCT CASE WHEN e.type = 'cta_clicked'   THEN e.session_id END) AS cta
+       ${BASE_FROM}
+       WHERE ${w.sql} AND json_extract(e.props_json, '$.result_id') IS NOT NULL
+       GROUP BY result_id
+       ORDER BY sessions DESC`,
+    )
+    .all(...w.params) as { result_id: string; sessions: number; cta: number }[];
+
+  const titles = new Map<string, string>();
+  for (const cfg of configsFor(f.funnelKey, f.version)) {
+    for (const [id, r] of Object.entries(cfg.results ?? {})) {
+      if (!titles.has(id)) titles.set(id, r.title ?? id);
+    }
+  }
+
+  return rows.map((r) => ({
+    resultId: r.result_id,
+    title: titles.get(r.result_id) ?? r.result_id,
+    sessions: r.sessions,
+    share: safeRate(r.sessions, total),
+    ctaSessions: r.cta,
+    ctaRate: safeRate(r.cta, r.sessions),
+  }));
+}
+
 export function listCampaigns(funnelKey: string): string[] {
   const rows = getDb()
     .prepare(
@@ -376,11 +431,12 @@ export function buildReport(filters: AnalyticsFilters): AnalyticsReport {
 
   const activeRow = getActiveVersionRow(f.funnelKey);
   const activeConfig = activeRow ? parseConfig(activeRow) : null;
+  const overall = segment(f, 'All traffic');
 
   return {
     funnelKey: f.funnelKey,
     filters: f,
-    overall: segment(f, 'All traffic'),
+    overall,
     byVariant: variants.map((v) => segment({ ...f, variant: v }, `Variant ${v}`)),
     byVersion: versions.map((v) => segment({ ...f, version: v }, `v${v}`)),
     customEvents: customEvents(f),
@@ -390,10 +446,11 @@ export function buildReport(filters: AnalyticsFilters): AnalyticsReport {
     variants,
     experiment: activeConfig
       ? {
-          key: activeConfig.experiment?.key ?? '',
-          hypothesis: activeConfig.experiment?.hypothesis ?? '',
-          primaryMetric: activeConfig.experiment?.primaryMetric ?? '',
+          id: activeConfig.experiment?.id ?? '',
+          variants: Object.keys(activeConfig.experiment?.variants ?? {}),
+          assignment: activeConfig.experiment?.assignment ?? 'server',
         }
       : null,
+    results: resultBreakdown(f, overall.resultSessions),
   };
 }

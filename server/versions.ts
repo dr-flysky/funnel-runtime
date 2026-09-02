@@ -13,6 +13,7 @@ export interface VersionRow {
   id: number;
   funnel_key: string;
   version: number;
+  source_version: number | null;
   config_json: string;
   note: string | null;
   created_at: string;
@@ -22,13 +23,16 @@ export interface VersionSummary {
   id: number;
   funnelKey: string;
   version: number;
+  /** The version the config declared for itself, if any. */
+  sourceVersion: number | null;
   name: string;
   note: string | null;
   createdAt: string;
   isActive: boolean;
   stepCount: number;
+  resultCount: number;
   variants: string[];
-  experimentKey: string;
+  experimentId: string;
 }
 
 export class ConfigValidationError extends Error {
@@ -67,13 +71,15 @@ export function listVersions(funnelKey: string): VersionSummary[] {
       id: row.id,
       funnelKey: row.funnel_key,
       version: row.version,
-      name: cfg.name,
+      sourceVersion: row.source_version,
+      name: cfg.title,
       note: row.note,
       createdAt: row.created_at,
       isActive: active?.id === row.id,
-      stepCount: cfg.steps.length,
+      stepCount: Object.keys(cfg.steps ?? {}).length,
+      resultCount: Object.keys(cfg.results ?? {}).length,
       variants: Object.keys(cfg.experiment?.variants ?? {}),
-      experimentKey: cfg.experiment?.key ?? '',
+      experimentId: cfg.experiment?.id ?? '',
     };
   });
 }
@@ -130,7 +136,7 @@ export function publishVersion(
   if (errors.length > 0) throw new ConfigValidationError(errors);
 
   const db = getDb();
-  const funnelKey = config.key;
+  const funnelKey = config.funnelId;
   const row = db
     .prepare('SELECT COALESCE(MAX(version), 0) AS max FROM funnel_versions WHERE funnel_key = ?')
     .get(funnelKey) as { max: number };
@@ -139,10 +145,19 @@ export function publishVersion(
 
   const info = db
     .prepare(
-      `INSERT INTO funnel_versions (funnel_key, version, config_json, note, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO funnel_versions (funnel_key, version, source_version, config_json, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(funnelKey, version, JSON.stringify({ ...config, version }), opts.note ?? null, ts);
+    .run(
+      funnelKey,
+      version,
+      typeof config.version === 'number' ? config.version : null,
+      // Stored verbatim apart from `version`, which the platform owns: it is
+      // what sessions pin to, so it must follow our sequence, not the file's.
+      JSON.stringify({ ...config, version }),
+      opts.note ?? null,
+      ts,
+    );
 
   const versionId = Number(info.lastInsertRowid);
   if (opts.activate !== false) {

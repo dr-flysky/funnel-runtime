@@ -2,7 +2,7 @@
 import { getDb } from '../server/db.ts';
 import { rollbackToPrevious, listVersions } from '../server/versions.ts';
 
-const funnelKey = process.argv[2] ?? process.env.DEFAULT_FUNNEL_KEY ?? 'quickcash';
+const funnelKey = process.argv[2] ?? process.env.DEFAULT_FUNNEL_KEY ?? 'workstyle-planner';
 
 getDb();
 const before = listVersions(funnelKey).find((v) => v.isActive);

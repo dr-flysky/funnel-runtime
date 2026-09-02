@@ -3,7 +3,7 @@
  * batching, safe retry after timeout, and one bad event not poisoning a batch.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { makeEvent, seedV1, startServer, useFreshDb, type TestServer } from './helpers.ts';
+import { FUNNEL, makeEvent, publishV2, seedV1, startServer, useFreshDb, type TestServer } from './helpers.ts';
 import { createSession } from '../server/sessions.ts';
 import { countEvents, ingestEvents } from '../server/events.ts';
 import { getDb } from '../server/db.ts';
@@ -22,7 +22,7 @@ afterEach(async () => {
 
 describe('event ingest', () => {
   it('stores an event once no matter how often it is resent', () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+    const session = createSession({ funnelKey: FUNNEL });
     const event = makeEvent(session.sessionId, 'step_viewed', { step_id: 'intro' });
 
     const first = ingestEvents([event]);
@@ -37,7 +37,7 @@ describe('event ingest', () => {
   });
 
   it('accepts a batch and reports a verdict per event', async () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+    const session = createSession({ funnelKey: FUNNEL });
     const batch = [
       makeEvent(session.sessionId, 'session_started'),
       makeEvent(session.sessionId, 'step_viewed', { step_id: 'intro' }),
@@ -53,7 +53,7 @@ describe('event ingest', () => {
   });
 
   it('is safe to replay an entire batch after a timeout', async () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+    const session = createSession({ funnelKey: FUNNEL });
     const batch = Array.from({ length: 12 }, (_, i) =>
       makeEvent(session.sessionId, 'step_viewed', { step_id: `step_${i}`, client_seq: i }),
     );
@@ -70,14 +70,14 @@ describe('event ingest', () => {
   });
 
   it('rejects only the malformed event and stores its siblings', async () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+    const session = createSession({ funnelKey: FUNNEL });
     const batch = [
       makeEvent(session.sessionId, 'step_viewed', { step_id: 'intro' }),
       { event_id: 'no-session-here', session_id: 'does-not-exist', type: 'step_viewed' },
       makeEvent(session.sessionId, 'step_completed', { step_id: 'intro' }),
       { session_id: session.sessionId, type: 'step_viewed' }, // missing event_id
       makeEvent(session.sessionId, 'result_viewed', { step_id: 'result' }),
-      { event_id: 'bad-type-event', session_id: session.sessionId, type: 'Not A Type' },
+      { event_id: 'bad-name-event', session_id: session.sessionId, type: 'Not A Name' },
     ];
 
     const res = await server.post('/api/events', { events: batch });
@@ -92,7 +92,7 @@ describe('event ingest', () => {
   });
 
   it('keeps a rejection trail rather than dropping bad events silently', async () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+    const session = createSession({ funnelKey: FUNNEL });
     await server.post('/api/events', {
       events: [
         makeEvent(session.sessionId, 'step_viewed', { step_id: 'intro' }),
@@ -107,7 +107,7 @@ describe('event ingest', () => {
   });
 
   it('labels events from the session row, ignoring client-supplied version and variant', () => {
-    const session = createSession({ funnelKey: 'quickcash', variantOverride: 'B' });
+    const session = createSession({ funnelKey: FUNNEL, variantOverride: 'B' });
     ingestEvents([
       makeEvent(session.sessionId, 'step_viewed', {
         step_id: 'intro',
@@ -117,18 +117,32 @@ describe('event ingest', () => {
     ]);
 
     const row = getDb()
-      .prepare('SELECT version, variant, funnel_key FROM events LIMIT 1')
-      .get() as { version: number; variant: string; funnel_key: string };
+      .prepare('SELECT version, variant, funnel_key, experiment_id FROM events LIMIT 1')
+      .get() as { version: number; variant: string; funnel_key: string; experiment_id: string };
 
     expect(row.version).toBe(1);
     expect(row.variant).toBe('B');
-    expect(row.funnel_key).toBe('quickcash');
+    expect(row.funnel_key).toBe(FUNNEL);
+    expect(row.experiment_id).toBe('question-order-and-result-framing-v1');
   });
 
-  it('accepts an event type the config introduced without any schema change', () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+  it('rejects an event the session version does not declare', () => {
+    const session = createSession({ funnelKey: FUNNEL });
+    const res = ingestEvents([makeEvent(session.sessionId, 'help_opened', { step_id: 'intro' })]);
+
+    expect(res.rejected).toBe(1);
+    expect(res.results[0].error).toMatch(/not declared by funnel version 1/);
+    expect(countEvents()).toBe(0);
+  });
+
+  it('accepts an event a newer config version introduces, with no schema change', () => {
+    // v2 declares `help_opened` in events.allowed. No migration, no server edit.
+    publishV2();
+    const session = createSession({ funnelKey: FUNNEL });
+    expect(session.version).toBe(2);
+
     const res = ingestEvents([
-      makeEvent(session.sessionId, 'help_opened', { step_id: 'amount', props: { surface: 'inline' } }),
+      makeEvent(session.sessionId, 'help_opened', { step_id: 'intro', props: { surface: 'inline' } }),
     ]);
     expect(res.accepted).toBe(1);
 
@@ -137,7 +151,7 @@ describe('event ingest', () => {
   });
 
   it('refuses an oversized batch instead of silently truncating it', async () => {
-    const session = createSession({ funnelKey: 'quickcash' });
+    const session = createSession({ funnelKey: FUNNEL });
     const huge = Array.from({ length: 501 }, () => makeEvent(session.sessionId, 'step_viewed'));
     const res = await server.post('/api/events', { events: huge });
     expect(res.status).toBe(413);

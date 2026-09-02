@@ -1,19 +1,25 @@
-import type { Answers, FunnelConfig, Progress } from '@shared/funnel';
+import type { Answers, Progress, ResolvedFunnel, ResultDef } from '@shared/funnel';
 
 export interface SessionView {
   sessionId: string;
-  funnelKey: string;
+  funnelId: string;
   version: number;
   versionId: number;
   variant: string;
   variantSource: string;
-  config: FunnelConfig;
-  currentStep: string;
-  history: string[];
+  experimentId: string;
+  funnel: ResolvedFunnel;
+  visibleStepIds: string[];
+  currentStep: string | null;
+  currentStepType: string | null;
+  canGoBack: boolean;
   completed: boolean;
   progress: Progress;
   answers: Answers;
+  resultId: string | null;
+  result: ResultDef | null;
   utm: Record<string, string | null>;
+  expiresAt: string | null;
   answerSummary?: Record<string, unknown>;
   reachedResult?: boolean;
 }
@@ -22,13 +28,15 @@ export interface VersionSummary {
   id: number;
   funnelKey: string;
   version: number;
+  sourceVersion: number | null;
   name: string;
   note: string | null;
   createdAt: string;
   isActive: boolean;
   stepCount: number;
+  resultCount: number;
   variants: string[];
-  experimentKey: string;
+  experimentId: string;
 }
 
 export class ApiError extends Error {
@@ -85,9 +93,15 @@ export const api = {
     }>(`/api/admin/versions?funnelKey=${encodeURIComponent(funnelKey)}`),
 
   configFiles: () =>
-    request<{ files: { file: string; key: string | null; name: string; steps: number }[] }>(
-      '/api/admin/config-files',
-    ),
+    request<{
+      files: {
+        file: string;
+        key: string | null;
+        name: string;
+        steps: number;
+        sourceVersion: number | null;
+      }[];
+    }>('/api/admin/config-files'),
 
   publishFile: (file: string, note?: string) =>
     post<VersionSummary>('/api/admin/publish-file', { file, note }),

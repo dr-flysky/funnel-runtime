@@ -12,7 +12,7 @@
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
     "seed": "tsx scripts/seed.ts",
     "generate:traffic": "tsx scripts/generate-traffic.ts",
-    "publish:v2": "tsx scripts/publish.ts configs/v2-quickcash.json",
+    "publish": "tsx scripts/publish.ts",
     "rollback": "tsx scripts/rollback.ts",
     "test": "vitest run",
     "test:watch": "vitest",

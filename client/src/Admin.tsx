@@ -12,7 +12,9 @@ interface Activation {
 export default function Admin({ funnelKey }: { funnelKey: string }) {
   const [versions, setVersions] = useState<VersionSummary[]>([]);
   const [activations, setActivations] = useState<Activation[]>([]);
-  const [files, setFiles] = useState<{ file: string; key: string | null; steps: number }[]>([]);
+  const [files, setFiles] = useState<
+    { file: string; key: string | null; steps: number; sourceVersion: number | null }[]
+  >([]);
   const [funnels, setFunnels] = useState<{ key: string; activeVersion: number | null }[]>([]);
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string; issues?: string[] } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -94,7 +96,9 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
             <div key={f.file} className="file-row">
               <div>
                 <code>{f.file}</code>
-                <span className="muted small"> · {f.steps} steps</span>
+                <span className="muted small">
+                  {' '}· {f.steps} steps{f.sourceVersion !== null ? ` · declares v${f.sourceVersion}` : ''}
+                </span>
               </div>
               <button
                 className="btn small"
@@ -124,6 +128,7 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
             <tr>
               <th>Version</th>
               <th>Steps</th>
+              <th>Results</th>
               <th>Variants</th>
               <th>Experiment</th>
               <th>Published</th>
@@ -139,8 +144,9 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
                   {v.isActive && <span className="pill ok">active</span>}
                 </td>
                 <td>{v.stepCount}</td>
+                <td>{v.resultCount}</td>
                 <td>{v.variants.join(' / ')}</td>
-                <td className="muted small">{v.experimentKey}</td>
+                <td className="muted small">{v.experimentId}</td>
                 <td className="muted small">{new Date(v.createdAt).toLocaleString()}</td>
                 <td className="muted small">{v.note}</td>
                 <td>

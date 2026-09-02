@@ -1,12 +1,16 @@
 # Funnel Runtime
 
-A small platform for running, versioning and analysing multi-step web funnels.
-Screens are not hardcoded anywhere — the frontend renders whatever JSON config
-the backend hands it, and the backend decides every transition.
+A platform for running, versioning and analysing multi-step web funnels. Screens
+are not hardcoded anywhere: the frontend renders whatever JSON config the backend
+hands it, and the backend decides every transition.
 
-**Stack:** TypeScript everywhere · React 18 + Vite · Node.js + Express ·
-SQLite via the built-in `node:sqlite` · Vitest. One repository, no third-party
-services, no native build step.
+It runs the supplied `funnel-v1.json` (`schemaVersion` 1.0) **natively** — the
+JSON that is published is the JSON that is stored and executed, with no
+translation layer in between.
+
+**Stack:** TypeScript everywhere · React 18 + Vite · Node.js + Express · SQLite
+via the built-in `node:sqlite` · Vitest. One repository, no third-party services,
+no native build step.
 
 ---
 
@@ -14,7 +18,7 @@ services, no native build step.
 
 ```bash
 npm install
-npm run seed              # publish the two iteration-1 configs
+npm run seed              # publish configs/funnel-v1.json
 npm run dev               # API on :3000, client on :5173 (proxied)
 ```
 
@@ -26,40 +30,74 @@ Open <http://localhost:5173>.
 | `/admin` | publish, activate and roll back versions |
 | `/dashboard` | analytics |
 
-Add `?funnel=cardmatch` to any route to switch funnels, `?variant=B` to force a
-variant, and `?utm_campaign=…` to tag a session.
+`?variant=A|B` forces a variant (the config names this parameter in
+`experiment.overrideQueryParam`); `?utm_campaign=…` tags a session.
 
 ### Fill it with data
 
 ```bash
-npm run generate:traffic          # 140 synthetic sessions, deterministic
+npm run generate:traffic            # 140 synthetic sessions, deterministic
 npm run generate:traffic -- 300 --seed=7
 ```
-
-Then reload `/dashboard`.
 
 ### Other commands
 
 ```bash
-npm test              # 64 tests
+npm test              # 80 tests
 npm run typecheck
 npm run build         # bundle the client into dist/client
 npm start             # single process serving API + built client on :3000
-npm run publish:v2    # publish the iteration-2 config
+npm run publish -- configs/funnel-v2.example.json
 npm run rollback      # roll back to the previously active version
 ```
 
-Production runs one process: `npm run build && npm start` serves the API and
-the built client together on `PORT` (default 3000).
+Requires **Node 22.5+** for `node:sqlite`.
+
+---
+
+## The config schema
+
+The supplied config drives everything. The engine implements its model directly:
+
+| Config key | What the runtime does with it |
+| --- | --- |
+| `steps` | An object keyed by step id. Types: `info`, `number`, `single-select`, `multi-select`, `result`. |
+| `experiment.variants[x].stepSequence` | The full ordered step list for that variant. **This is where ordering lives** — there are no per-step `next` pointers. |
+| `experiment.variants[x].stepOverrides` | Deep-merged per-step patches (variant B's intro and priorities copy). |
+| `experiment.variants[x].resultOverrides` | Deep-merged per-result patches (variant B's result titles and CTA). |
+| `steps[x].visibleWhen` | A condition tree. A step whose predicate is false is simply not shown. |
+| `resultRules` + `defaultResultId` | Ordered rules; first match wins, default catches the rest. |
+| `validation.messages` | Error copy comes from the config. The engine never invents text when the config supplies it. |
+| `progress.countVisibleOnly` / `excludeTypes` | The progress denominator: visible steps only, excluding `info` and `result`. |
+| `session.ttlHours` | 72h. A session past its TTL is not resumed. |
+| `events.allowed` | Which event names a version may emit, and the properties each carries. |
+| `events.privacy.storeRawAnswers` | `false` — see **Privacy** below. |
+
+### Branching by visibility, not by graph edges
+
+This is the design decision that shapes the whole engine. A variant supplies a
+linear `stepSequence`; a step carries `visibleWhen`; the visible path is the
+sequence filtered by those predicates, recomputed from the current answers on
+every request.
+
+That model **cannot produce an unreachable step or a dangling pointer**, so the
+engine needs no transition-repair logic and no reachability analysis. Changing an
+earlier answer takes effect immediately — going back and switching `work_mode`
+from `hybrid` to `remote` makes `office_days` disappear with no bookkeeping.
+
+The one hazard it *does* have is ordering: a `visibleWhen` that reads an answer
+collected **later** in its own variant's sequence silently evaluates against an
+absent answer, and the step vanishes for everybody. `validateConfig` rejects that
+at publish time, per variant, so it can never reach production.
 
 ---
 
 ## How the pieces fit
 
 ```
-shared/funnel.ts     pure engine: transitions, variant resolution, validation,
-                     progress, config validation. Imported by client, server
-                     and tests, so navigation cannot drift between them.
+shared/funnel.ts     pure engine: variant resolution, visibility, result rules,
+                     validation, progress, config validation. Imported by client,
+                     server and tests, so navigation cannot drift between them.
 
 server/versions.ts   immutable version store + the active-version pointer
 server/sessions.ts   session lifecycle; the server owns navigation
@@ -69,9 +107,9 @@ client/src/          funnel runner, admin, dashboard
 ```
 
 The server is authoritative for navigation. The client sends an answer and is
-told where it now is; it never computes the next step itself. That is what makes
-Back, refresh and reopening the tab lossless — the browser holds nothing but a
-session id.
+told where it now is; it never computes the next step. That is what makes Back,
+refresh and reopening the tab lossless — the browser holds nothing but a session
+id.
 
 ---
 
@@ -79,51 +117,66 @@ session id.
 
 | Table | Purpose |
 | --- | --- |
-| `funnel_versions` | **Immutable.** One row per published version, holding the full config JSON. Never updated. |
-| `funnel_active` | Mutable pointer: which version new sessions start on, per funnel. |
+| `funnel_versions` | **Immutable.** One row per published version holding the full config JSON, plus `source_version` (the version the file declared for itself). |
+| `funnel_active` | Mutable pointer: which version new sessions start on. |
 | `version_activations` | Audit log of every publish / activate / rollback. |
-| `sessions` | Pins `version_id` **and** `variant` at creation, plus UTM tags. |
-| `session_state` | Current step, history stack, completion flag. |
+| `sessions` | Pins `version_id`, `variant` and `experiment_id` at creation, plus UTM tags. |
+| `session_state` | Current step, completion flag, resolved `result_id`. |
 | `session_answers` | **Raw answers — this table only.** |
 | `events` | The analytics store. `event_id` is the primary key. |
 | `event_rejections` | Malformed events, kept rather than dropped silently. |
 | `ingest_counters` | Running tallies of received / accepted / duplicate / rejected. |
 
-Two design decisions carry most of the weight:
+Two decisions carry most of the weight:
 
 **Config rows are immutable and sessions hold a foreign key to one.** Publishing
-appends; it never rewrites. So a session that started on v1 keeps resolving v1's
+appends; it never rewrites. A session that started on v1 keeps resolving v1's
 config forever, and a rollback is a pointer move rather than a migration. No
 schema change is needed to publish a new version, because the version *is* data.
+The platform's `version` column is authoritative for pinning; the file's own
+`version` field is preserved separately as `source_version`.
 
-**Raw answers live outside the analytics store.** `session_answers` holds what
-the user actually typed. Events carry only a sanitised summary: for selects, the
-option ids (which come from the config, not the user), and for free numeric
-input, a coarse bucket like `"10800-20600"` rather than the figure itself. The
-funnel still works — the engine reads `session_answers` for branching — but the
-analytics tables never receive the underlying values.
+**Navigation state is not a history stack.** Because the model is a linear
+sequence plus visibility predicates, the previous step is *computed*
+(`previousStepId`) rather than stored. There is no history to keep in sync with
+the answers, so editing an earlier answer cannot leave a stale trail behind.
+
+### Privacy
+
+`events.privacy.storeRawAnswers: false` and `session.persistAnswers: true` are
+both honoured, and they are not in conflict:
+
+- Raw answers are written to `session_answers` and nowhere else. The funnel needs
+  them — `visibleWhen` and `resultRules` read them.
+- `answer_submitted` carries **only `answer_kind`**, exactly the one property the
+  config declares for it. Not the chosen option, not the number, not a bucket. A
+  test asserts the payload has that single key, so a future change that starts
+  leaking values fails the suite rather than shipping.
 
 ---
 
 ## Event schema
 
-Every event carries:
+Base properties on every event, matching `events.baseProperties`:
+`event_id`, `session_id`, `client_timestamp` (+ a server timestamp),
+`funnel_id`, `funnel_version`, `experiment_id`, `variant`, `step_id`,
+`utm_source`, `utm_medium`, `utm_campaign`.
 
-| Field | Notes |
+Per-event properties, exactly as declared:
+
+| Event | Properties |
 | --- | --- |
-| `event_id` | Client-generated. The idempotency key. |
-| `session_id` | |
-| `type` | |
-| `step_id` | Nullable (`session_started` has none). |
-| `client_ts`, `server_ts` | Both stored; neither is trusted for ordering. |
-| `client_seq` | The client's own counter, used only to *measure* disorder. |
-| `version`, `variant` | **Taken from the session row, never from the payload.** |
-| `utm_*` | Likewise copied from the session. |
-| `props_json` | Event-specific extras. |
-| `synthetic` | Marks generator traffic. |
+| `session_started` | — |
+| `step_viewed` | `step_type`, `visible_step_index`, `visible_step_count` |
+| `answer_submitted` | `answer_kind` |
+| `step_completed` | `next_step_id` |
+| `back_clicked` | `destination_step_id` |
+| `result_viewed` | `result_id` |
+| `cta_clicked` | `result_id`, `action` |
 
-Core types: `session_started`, `step_viewed`, `answer_submitted`,
-`step_completed`, `back_clicked`, `result_viewed`, `cta_clicked`.
+`funnel_version`, `variant`, `experiment_id` and the UTM tags are taken from the
+**session row**, never from the request body, so a stale or tampered client
+cannot mislabel its own events.
 
 ### Ingest invariants
 
@@ -132,17 +185,15 @@ verdict per event — `accepted`, `duplicate` or `rejected`:
 
 - **Deduplication** — `event_id` is the primary key; ingest is `INSERT OR IGNORE`.
   Resending is free.
-- **Safe retry** — replaying a whole batch after a timeout is just deduplication
-  N times. The response is always 200 when the envelope parses, so a retrying
+- **Safe retry** — replaying a whole batch after a timeout is deduplication N
+  times. The response is always 200 when the envelope parses, so a retrying
   client never spins on a permanently-bad payload.
 - **Partial failure** — each event is validated on its own. A malformed sibling
   is rejected and recorded in `event_rejections`; the rest still land.
-- **Open event types** — any `[a-z][a-z0-9_]{2,63}` type is accepted. This is why
-  iteration 2 could introduce `help_opened` with **no schema change and no server
-  change** — only a new config.
-
-Version and variant are deliberately read from the session row rather than the
-request body, so a stale or tampered client cannot mislabel its own events.
+- **Version-scoped event names** — an event is accepted if the config version the
+  session is pinned to declares it. A **new config version can introduce an event
+  with no migration and no server change**; a session on an older version is
+  correctly told the event is not declared for it.
 
 ---
 
@@ -161,128 +212,133 @@ arrives on time, so out-of-order delivery is not a special case.
 **3. Per-step conversion is `step_completed / step_viewed`.** The server only
 emits `step_completed` when it actually advanced the user, so this is a true
 step-to-step conversion that stays correct under branching. Comparing a step
-against its neighbour in array order would be meaningless when users take
-different paths — half the "drop-off" would just be people on another branch.
+against its neighbour in sequence order would be meaningless when `office_days`
+is invisible to a third of users — much of the apparent "drop-off" would just be
+people who were never shown it.
 
 Derived from those:
 
-- `dropOff` = `reached − completed` — saw the step, never got past it
-- `reachFromStart` = `reached / startedSessions` — the cumulative funnel view
+- `dropOff` = `reached − completed`
+- `reachFromStart` = `reached / startedSessions`
 - `viewsPerSession` = total `step_viewed` / `reached` — surfaces repeat views
 - `resultRate` = result sessions / started sessions
 - `ctaCtrOnResult` = CTA sessions / result sessions
-- `ctaClickRate` = CTA sessions / started sessions ← **the primary metric**
+- `ctaClickRate` = CTA sessions / started sessions ← **primary metric**
+- **Result distribution** — which of the four recommendations each session
+  reached, from the `result_id` property, by unique session
 
-Segments are computed by re-running the same query with an extra filter, so
-`byVariant` and `byVersion` always sum to `overall`. Sessions whose variant came
-from the `?variant=` test hatch are **excluded by default** (`variant_source =
-'assigned'`), so manual QA cannot contaminate the experiment read-out; pass
-`includeOverrides=true` to see them.
+**Step ordering in the report** is a genuine ambiguity: variants A and B order
+their questions differently, so there is no single true order. The report takes
+the first variant's sequence as the backbone and appends anything only other
+variants or older versions ask, so no step's numbers ever silently vanish.
 
-The dashboard's **Data quality** panel exists so the numbers can be trusted: it
-reports how many duplicates were suppressed, how many events arrived out of
-order (client sequence disagreeing with arrival order), and how many repeat step
-views occurred. Those are evidence that the messy cases happened and were
-handled, not that they were absent.
+Segments re-run the same query with an extra filter, so `byVariant` and
+`byVersion` always sum to `overall`. Sessions whose variant came from the
+`?variant=` test hatch are **excluded by default**; pass `includeOverrides=true`
+to see them.
+
+The dashboard's **Data quality** panel reports duplicates suppressed, events that
+arrived out of order (client sequence disagreeing with arrival order) and repeat
+step views — evidence that the messy cases happened and were handled, not that
+they were absent.
 
 ---
 
 ## The A/B experiment
 
-**Assignment** is server-side and stable twice over: it is a pure function of
-`(experimentKey, sessionId)` via FNV-1a, *and* the result is persisted on the
-session row at creation. Refresh, resume, a publish or a rollback can never move
-a session between variants. `?variant=A|B` overrides it for testing and is
-recorded as `variant_source = 'override'`.
+**Assignment** is server-side and stable twice over: a pure function of
+`(experiment.id, sessionId)` via FNV-1a, *and* persisted on the session row at
+creation. Refresh, resume, a publish or a rollback can never move a session
+between variants. This satisfies `assignment: "server"` and `sticky: true`.
 
-### Hypothesis (v1, `amount_first_v1`)
+### Hypothesis — `question-order-and-result-framing-v1`
 
-> Variant B asks for the loan amount immediately after the intro, before any
-> qualifying question. A low-effort, high-intent question should create
-> commitment earlier and reduce drop-off on the income step, lifting end-to-end
-> completion. Variant A keeps the conventional order: purpose first, amount later.
+Variant B changes two things at once:
+
+1. **Order.** It leads with `work_mode` and `timezone_span` — two taps — and
+   defers `team_size`, which requires typing a number.
+2. **Result framing.** Result titles become outcome statements ("Your team is
+   ready to reduce meetings" rather than "Async-native") and the CTA becomes
+   specific ("See the 30-day action list" rather than "View the action list").
+
+> **Hypothesis.** Opening with low-effort recognition questions rather than a
+> numeric entry reduces first-question abandonment, and naming a concrete
+> deliverable on the result screen converts more of the people who get there. We
+> expect B to lift end-to-end click-through.
 
 **Primary metric:** `cta_click_rate` — unique sessions with `cta_clicked` divided
 by unique sessions with `session_started`.
 
-It is the primary metric because it is the only one that spans the whole journey.
-Per-step conversion can be gamed by moving a hard question later; reaching the
-result can be gamed by removing questions. Only "started and ultimately clicked
-through" captures whether the reordering produced more genuinely engaged users.
+It is the primary metric because it is the only one spanning the whole journey.
+Per-step conversion can be gamed by moving a hard question later — which is
+precisely what B does — and result-reaching can be gamed by asking less. Only
+"started, and ultimately clicked through" captures whether the change produced
+more genuinely engaged people.
 
-**Guardrail:** `resultRate`. If B lifts CTA clicks while pushing result-reaching
-down, the change is shuffling drop-off rather than removing it.
+**Guardrails.** `resultRate` (is B moving drop-off around rather than removing
+it?) and the **result distribution** (B must not shift which recommendation
+people receive — the questions are merely reordered, so the mix should be stable;
+if it moves, the reordering is changing answers, not just their sequence).
 
-### Iteration 2 (`amount_first_v2`)
+Because B changes order *and* copy, a win does not attribute to one of them.
+That is a deliberate trade for one experiment's worth of traffic, and a follow-up
+would split them.
 
-B additionally drops the `preferences` step, testing whether cutting the last
-non-essential question lifts click-through. Variant A is unchanged, which keeps
-the control comparable across both versions.
-
-**On reading the numbers:** the dashboard shows a directional lift and says so.
-A few hundred synthetic sessions is not a powered experiment, and the generator's
+**On reading the numbers:** the dashboard shows a directional lift and says so. A
+few hundred synthetic sessions is not a powered experiment, and the generator's
 outcomes are random rather than modelled on the hypothesis — the plumbing is what
-is being demonstrated, not a real result.
+is demonstrated, not a result.
 
 ---
 
-## Iteration 2, end to end
+## Iteration 2
 
-The new config adds a conditional branch (`refinance_details`, reached when the
-goal is debt consolidation), removes `preferences` for variant B, and introduces
-the `help_opened` event.
+The real iteration-2 config has not been supplied yet. To prove the flow works
+end to end, `configs/funnel-v2.example.json` is a **stand-in** derived from v1
+that exercises exactly the three changes iteration 2 specifies:
+
+- **a new conditional branch** — `meeting_load`, visible only when
+  `async_maturity` is `low` or `medium`
+- **a step removed for one variant** — variant B drops `tool_count` by omitting
+  it from its `stepSequence`
+- **a new event** — `help_opened`, declared in `events.allowed`
 
 ```bash
-npm run publish:v2     # or click Publish on /admin
-npm run rollback       # or click Roll back
+npm run publish -- configs/funnel-v2.example.json
+npm run rollback
 ```
 
-What happens, verified by `tests/version-pinning.test.ts` and by hand:
+Verified by hand and by `tests/version-pinning.test.ts`:
 
 | | |
 | --- | --- |
-| Sessions started before the publish | keep running on v1, including their config, and can still advance |
-| New sessions | start on v2 and see the refinance branch |
-| Variant B on v2 | never sees `preferences`; the engine repairs `employment → preferences` into `employment → result` automatically |
-| `help_opened` | stored and reported with no migration |
-| After rollback | new sessions get v1; v2 sessions stay on v2; **both versions' analytics remain** and are comparable side by side |
+| Sessions started before the publish | keep running on v1, including their config, and still advance |
+| New sessions | start on v2 and see the new branch |
+| Variant B on v2 | never sees `tool_count`; omission from a linear sequence cannot strand anyone |
+| `help_opened` | accepted on v2, rejected on v1, with no migration |
+| After rollback | new sessions get v1; v2 sessions stay on v2; **both versions' analytics remain** and are comparable |
 
-Removing a step is the interesting case. `resolveVariantConfig` drops it and then
-rewrites every transition that pointed at it, following the removed step's own
-default target until it reaches a surviving step. Without that, variant B would
-have had a dangling `goto` and users would have fallen off the end of the funnel.
-`validateConfig` rejects a config where that repair cannot resolve, so a broken
-version can never become active.
-
----
-
-## Progress under branching
-
-The progress indicator counts only steps *this* user can reach: the history they
-have walked, plus a forward simulation from the current step using their own
-answers. Choosing "income below 2000" removes the credit and employment
-questions from the total immediately, rather than showing a denominator the user
-will never reach.
-
-Where a branch is not yet decided the engine takes the first rule as a
-deterministic estimate, so the bar does not flicker between renders.
+Swapping in the real file should need no code change. Anything it exercises that
+the engine lacks would be the interesting finding — the most likely candidates
+are a new step `type`, a new condition `operator`, or a `resultSource` other than
+`resultRules`.
 
 ---
 
 ## Tests
 
 ```bash
-npm test    # 64 tests, ~1.5s
+npm test    # 80 tests, ~1.5s
 ```
 
 | File | Covers |
 | --- | --- |
+| `engine.test.ts` | variant resolution and deep merge, visibility branching, result rules, progress policy, config-supplied validation messages, answer-kind-only summaries |
 | `version-pinning.test.ts` | version pinned per session; publish and rollback don't move live sessions |
 | `ab-stability.test.ts` | variant stable across resume; override honoured; even split; per-variant configs |
-| `event-ingest.test.ts` | dedup, batching, timeout replay, partial failure, session-sourced labels |
+| `event-ingest.test.ts` | dedup, batching, timeout replay, partial failure, session-sourced labels, version-scoped event names |
 | `publish-rollback.test.ts` | publish, activate, roll back, audit trail, invalid configs refused |
 | `analytics.test.ts` | hand-countable scenarios for every metric under duplicates, Back and out-of-order arrival |
-| `engine.test.ts` | branching, variant resolution and repair, progress, validation, answer sanitisation |
 
 The analytics tests deliberately build tiny scenarios where the right answer is
 obvious by inspection — three sessions see a step, one gets past it, so drop-off
@@ -294,18 +350,18 @@ is two — rather than asserting whatever the implementation happens to return.
 
 `scripts/generate-traffic.ts` boots the real app on an ephemeral port and drives
 it over HTTP, so ingest, validation and navigation are genuinely exercised rather
-than bypassed by writing rows directly. It is seeded, so a given seed reproduces
-the same traffic.
+than bypassed by writing rows directly. Seeded, so a given seed reproduces the
+same traffic. Events carry exactly the properties the config declares.
 
-It produces, by construction: both variants; six UTM campaigns; every branch
-including the business and low-income paths; drop-off spread across steps;
-Back-then-forward loops that create repeat step views; whole batches resent after
-a simulated timeout; adjacent events swapped so they arrive out of order; and
-malformed events mixed into otherwise-valid batches.
+It produces by construction: both variants; six UTM campaigns; every branch,
+including the hidden `office_days` step and all four results; drop-off spread
+across steps; Back-then-forward loops that create repeat step views; whole
+batches resent after a simulated timeout; adjacent events swapped so they arrive
+out of order; and malformed events mixed into valid batches.
 
-A representative run of 140 sessions: ~2,300 events sent, ~375 duplicates
-suppressed, ~30 malformed rejected with siblings intact, ~130 events arriving out
-of order.
+A representative run of 140 sessions: ~2,700 events sent, ~250 duplicates
+suppressed, ~27 malformed rejected with siblings intact, ~127 arriving out of
+order, all four recommendations reached.
 
 ---
 
@@ -313,8 +369,7 @@ of order.
 
 `Dockerfile` plus blueprints in `deploy/` for Render and Fly. Both mount a volume
 at `/data` so the SQLite file survives deploys, and `scripts/seed-if-empty.ts`
-publishes the iteration-1 configs on first boot only — a redeploy never resets a
-live funnel.
+publishes on first boot only — a redeploy never resets a live funnel.
 
 ```bash
 docker build -t funnel-runtime .
@@ -326,116 +381,113 @@ admin routes. Unset, they are open — see the assumptions below.
 
 ---
 
-## Build timeline
-
-Built in one continuous session, in this order. Wall-clock times are for the
-reviewer to weigh against the 48-hour budget; the sequence is what mattered.
-
-**Iteration 1**
-
-1. **Engine first, before any I/O.** `shared/funnel.ts` — transitions, variant
-   resolution, validation, progress — written and smoke-tested against the
-   configs standalone. Everything downstream depends on it being right, and it is
-   pure, so it was cheap to verify early.
-2. **Schema.** Designed around the two hard requirements (immutable versions,
-   idempotent events) rather than around the screens. Both invariants are
-   enforced by constraints, not by application code.
-3. **Server:** version store → sessions → ingest → analytics, each verified
-   against the previous layer before moving on.
-4. **Traffic generator before the UI.** This was the highest-leverage ordering
-   decision: it gave a realistic dataset to develop the dashboard against, and it
-   immediately exposed two analytics bugs that a hand-clicked session would not
-   have — a parameter-order mismatch that silently zeroed every filtered segment,
-   and the result screen leaking into the step table.
-5. **Tests**, then **client**.
-
-**Iteration 2**
-
-6. Wrote `v2-quickcash.json` (new branch, step removed for variant B, new event),
-   published it, verified in-flight v1 sessions were unaffected, rolled back, and
-   confirmed both versions' analytics survived.
-
-The step-removal case drove a real engine change: transitions pointing at a
-removed step now get rewritten to that step's own onward target, and
-`validateConfig` refuses to publish a config where that cannot resolve.
-
-## Working with AI agents
-
-Built with Claude Code, driven as a single directed session rather than a fan-out
-of parallel agents — at this size, coordination overhead would have exceeded the
-benefit, and every layer here depends on the one beneath it.
-
-What that looked like in practice:
-
-- **Verification after each layer, not at the end.** Every stage was exercised
-  before the next was built — the engine against real configs, ingest against the
-  generator, analytics against hand-countable fixtures. The two bugs found were
-  caught by running the thing, not by reading it.
-- **Tests assert hand-derived values.** In `analytics.test.ts` the scenarios are
-  deliberately tiny — three sessions see a step, one gets past it, so drop-off is
-  two — because a test that asserts whatever the implementation returned would
-  have happily locked in the parameter-order bug.
-- **Two bugs were mine, two were the tests'.** When the suite first ran, two
-  failures were genuine test errors (a helper returning the wrong type, and a
-  test that assumed variant A when assignment is random) rather than source bugs.
-  Both are noted here because telling those apart is the actual skill.
-
-Every design decision in this README — the immutability rule, the
-`completed/viewed` conversion definition, the rollback policy, the raw-answer
-split — is one I can defend and would defend differently if the constraints
-changed.
-
 ## Known limitations and assumptions
 
-**Assumptions I made where the brief was silent.** Each is a real decision; happy
-to change any of them:
+**Confirmed with the client:**
 
-1. **"No third-party services" means no external SaaS for analytics, feature
-   flags or data** — not "no hosting". The event pipeline, experiment assignment
-   and storage are all built here. A public URL has to run somewhere.
+1. **"No third-party services" does not ban hosting platforms** — confirmed, so
+   Vercel / Render / Fly are in scope. The event pipeline, experiment assignment
+   and storage are all built here regardless.
+
+**Assumptions where the brief is still silent:**
+
 2. **Rollback does not migrate live sessions.** The brief specifies behaviour for
    *publish* (old sessions continue on the old version) but not for *rollback*. I
    apply the same rule in both directions: a session never moves across configs,
    because the answers it already gave were validated against the config it
-   started on. Forcing it onto another version could strand it on a step that no
-   longer exists.
-3. **Variant is assigned per session**, matching the brief's "stable within the
-   session". There is no cross-session user identity, so a returning visitor with
-   cleared storage is a new session and may be re-bucketed.
+   started on.
+3. **Variant is assigned per session**, matching `sticky: true` and the brief's
+   "stable within the session". There is no cross-session user identity, so a
+   returning visitor with cleared storage is a new session and may be re-bucketed.
 4. **Session state is server-side, keyed by a session id in `localStorage`.**
    Refresh and reopening the tab resume perfectly; a different browser or device
-   does not, since there is no user account to tie sessions together.
-5. **The admin and dashboard routes are unauthenticated by default** so the
-   deployed URL can be reviewed without credentials. `ADMIN_TOKEN` gates the
-   mutating routes when set. This is not a production posture.
+   does not, since there is no account to tie sessions together.
+5. **Admin and dashboard routes are unauthenticated by default** so the deployed
+   URL can be reviewed without credentials. `ADMIN_TOKEN` gates the mutating
+   routes when set. Not a production posture.
 6. **Analytics counts sessions from `session_started` events**, not from session
-   rows — the event pipeline is the source of truth, so a session that never
-   emitted anything does not appear.
-7. **Override sessions are excluded from the experiment read-out by default**, so
-   manual QA does not skew the comparison.
-8. **I wrote the configs.** The brief refers to two configs supplied with the
-   assignment; they were not attached, so I authored `v1-quickcash.json` and
-   `v1-cardmatch.json` (two different funnels, to show the runtime is not tuned
-   to one) plus `v2-quickcash.json` for iteration 2. Swapping in the intended
-   configs should need no code change — anything they exercise that the engine
-   lacks would be the interesting finding.
+   rows — the event pipeline is the source of truth.
+7. **Override sessions are excluded from the experiment read-out by default.**
+8. **The platform owns version numbering.** The file's own `version` field is
+   recorded as `source_version` but the platform's sequence is what sessions pin
+   to, so publishing the same file twice yields two distinct versions rather than
+   a collision.
+9. **Two characters in the supplied `funnel-v1.json` arrived mojibaked** —
+   `"About 3â6 hours apart"` and `"Building your recommendationâ¦"`, a UTF-8
+   transfer artifact. I restored them to `3–6` and `…`. Worth confirming the
+   original file is clean at source.
 
 **Genuine limitations:**
 
 - **SQLite on one node.** Correct and fast here, but ingest is synchronous and
   single-writer; real volume would need a queue in front and a server-side
   database behind.
-- **Analytics is computed on every request.** Fine at this scale (a few thousand
-  events, sub-millisecond); a production version would pre-aggregate into a
-  rollup table.
+- **Analytics is computed per request.** Fine at this scale; production would
+  pre-aggregate into a rollup table.
 - **No significance testing.** The dashboard reports a directional lift and
-  labels it as such. Adding a proper test would need a real traffic model.
+  labels it as such.
+- **The progress denominator can grow mid-funnel.** Answering `work_mode:
+  hybrid` reveals `office_days`, taking the count from 6 to 7. That is the honest
+  reading of `countVisibleOnly`, but it means the bar can step backwards. The
+  alternative — assuming conditional steps *will* appear until ruled out — makes
+  the bar jump the other way for the two-thirds of users who do see it. I chose
+  the config-faithful reading; happy to flip it.
 - **`client_seq` measures disorder but does not correct it.** By design —
-  aggregation is order-independent, so there is nothing to correct. It exists so
-  the dashboard can *show* that out-of-order traffic arrived.
-- **No visual config editor**, per the brief. Configs are published from JSON
-  files or the API.
+  aggregation is order-independent, so there is nothing to correct.
+- **No visual config editor**, per the brief.
 - **The generator's outcomes are random, not modelled on the hypothesis.** It
   proves the pipeline, not the experiment.
 - **`node:sqlite` requires Node 22.5+.** It is loaded through `createRequire`
   because Vite and Vitest resolve against builtin lists that predate it.
+
+---
+
+## Build timeline
+
+**Iteration 1 (first pass, before the config arrived).** Built against a config
+schema I designed myself, since the two referenced configs were not attached:
+engine first, then schema, version store, sessions, ingest, analytics, traffic
+generator, tests, client.
+
+**Adapting to the supplied config.** When `funnel-v1.json` arrived its schema
+differed substantially from my placeholder — steps keyed by id rather than an
+array, `stepSequence` per variant instead of per-step `next` pointers,
+`visibleWhen` instead of graph edges, four results selected by `resultRules`
+instead of one, and config-supplied validation copy.
+
+I rewrote the engine to speak that schema **natively** rather than adapting it
+into my own shape. An adapter would have been faster and would have been the
+wrong call: the config is the client's contract, and a translation layer is one
+more thing to drift, plus it would have made the stored config not-quite the
+published config — which is exactly what the version-pinning guarantee rests on.
+
+The architecture survived intact. Version pinning, event idempotency, session
+ownership of navigation and the aggregation rules are all schema-independent, so
+the change was confined to `shared/funnel.ts`, the config-shaped edges of the
+server, the renderers and the fixtures. The new model is *simpler*: branching by
+visibility cannot dangle, so ~80 lines of transition-repair logic were deleted
+outright.
+
+**Iteration 2.** Pending the real config; the flow is proven with a stand-in.
+
+## Working with AI agents
+
+Built with Claude Code, driven as a single directed session rather than a fan-out
+of parallel agents — every layer here depends on the one beneath it, so
+coordination overhead would have exceeded the benefit.
+
+- **Verification after each layer, not at the end.** The engine was smoke-tested
+  against the real config before any server code touched it; ingest was proven
+  with the generator before the dashboard was written.
+- **Tests assert hand-derived values.** A test that asserts whatever the
+  implementation returned would have locked in the parameter-order bug below.
+- **Four bugs, and telling them apart is the skill.** Two were mine — a
+  parameter-order mismatch in the analytics WHERE builder that silently zeroed
+  every filtered segment, and a validation-message lookup that preferred the
+  `required` key when this config supplies only `minSelections`, falling through
+  to generic engine text. Two were bugs in my *tests* — a helper returning the
+  wrong type, and assertions that assumed a variant when assignment is random.
+- **One self-inflicted wound worth recording:** a SQL comment containing a
+  backtick terminated the template literal holding the schema. Caught instantly
+  by typecheck, which is the argument for running it after every edit rather than
+  at the end.

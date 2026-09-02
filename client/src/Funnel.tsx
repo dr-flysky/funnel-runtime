@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, type SessionView } from './api';
 import { tracker } from './tracker';
-import { RESULT, type AnswerValue, type SelectStep, type Step } from '@shared/funnel';
+import type { AnswerValue, StepDef } from '@shared/funnel';
 
 const SESSION_KEY = (funnelKey: string) => `funnel_runtime.session.${funnelKey}`;
 
@@ -15,13 +15,17 @@ function readUtm(): Record<string, string> {
   return utm;
 }
 
+function currentStep(view: SessionView): StepDef | null {
+  if (!view.currentStep) return null;
+  return view.funnel.steps.find((s) => s.id === view.currentStep) ?? null;
+}
+
 export default function Funnel({ funnelKey }: { funnelKey: string }) {
   const [view, setView] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [draft, setDraft] = useState<AnswerValue>(null);
   const [busy, setBusy] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
   const viewedRef = useRef<string | null>(null);
 
   // ---- boot: resume the stored session, or start a new one -----------------
@@ -37,18 +41,16 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
             if (!cancelled) setView(resumed);
             return;
           } catch (err) {
-            // A session from a wiped database: fall through and start fresh.
-            if (!(err instanceof ApiError) || err.status !== 404) throw err;
+            // Expired, or a session from a wiped database: start fresh.
+            if (!(err instanceof ApiError) || (err.status !== 404 && err.status !== 410)) throw err;
+            localStorage.removeItem(SESSION_KEY(funnelKey));
           }
         }
 
         const params = new URLSearchParams(window.location.search);
         const created = await api.startSession(funnelKey, readUtm(), params.get('variant'));
         localStorage.setItem(SESSION_KEY(funnelKey), created.sessionId);
-        tracker.track(created.sessionId, 'session_started', null, {
-          variant: created.variant,
-          version: created.version,
-        });
+        tracker.track(created.sessionId, 'session_started');
         if (!cancelled) setView(created);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -60,19 +62,27 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     };
   }, [funnelKey]);
 
-  // ---- one step_viewed per (session, step) arrival ------------------------
+  // ---- one step_viewed / result_viewed per arrival ------------------------
   useEffect(() => {
     if (!view) return;
-    const marker = `${view.sessionId}:${view.currentStep}`;
+    const marker = `${view.sessionId}:${view.currentStep ?? 'result'}:${view.completed}`;
     if (viewedRef.current === marker) return;
     viewedRef.current = marker;
 
-    if (view.currentStep === RESULT || view.completed) {
-      tracker.track(view.sessionId, 'result_viewed', view.config.result.id, {
-        result_id: view.config.result.id,
+    const step = currentStep(view);
+    if (view.completed || step?.type === 'result') {
+      // Declared properties for result_viewed: result_id.
+      tracker.track(view.sessionId, 'result_viewed', view.currentStep, {
+        result_id: view.resultId,
       });
-    } else {
-      tracker.track(view.sessionId, 'step_viewed', view.currentStep);
+    } else if (step) {
+      // Declared properties for step_viewed: step_type, visible_step_index,
+      // visible_step_count.
+      tracker.track(view.sessionId, 'step_viewed', step.id, {
+        step_type: step.type,
+        visible_step_index: view.progress.visibleIndex,
+        visible_step_count: view.progress.visibleCount,
+      });
     }
   }, [view?.sessionId, view?.currentStep, view?.completed]);
 
@@ -80,9 +90,9 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
   useEffect(() => {
     if (!view) return;
     setFieldError(null);
-    setHelpOpen(false);
-    const existing = view.answers[view.currentStep];
-    setDraft(existing ?? (currentStep(view)?.type === 'multi_select' ? [] : null));
+    const step = currentStep(view);
+    const existing = step ? view.answers[step.id] : undefined;
+    setDraft(existing ?? (step?.type === 'multi-select' ? [] : null));
   }, [view?.currentStep, view?.sessionId]);
 
   const step = view ? currentStep(view) : null;
@@ -93,8 +103,16 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     setFieldError(null);
     try {
       const next = await api.answer(view.sessionId, step.id, draft);
-      tracker.track(view.sessionId, 'answer_submitted', step.id, next.answerSummary ?? {});
-      tracker.track(view.sessionId, 'step_completed', step.id);
+
+      if (step.type !== 'info') {
+        // Declared property for answer_submitted: answer_kind, and nothing
+        // else — the config sets events.privacy.storeRawAnswers to false.
+        tracker.track(view.sessionId, 'answer_submitted', step.id, next.answerSummary ?? {});
+      }
+      // Declared property for step_completed: next_step_id.
+      tracker.track(view.sessionId, 'step_completed', step.id, {
+        next_step_id: next.currentStep ?? null,
+      });
       setView(next);
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) setFieldError(err.message);
@@ -108,8 +126,12 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     if (!view || busy) return;
     setBusy(true);
     try {
-      tracker.track(view.sessionId, 'back_clicked', view.currentStep);
-      setView(await api.back(view.sessionId));
+      const back = await api.back(view.sessionId);
+      // Declared property for back_clicked: destination_step_id.
+      tracker.track(view.sessionId, 'back_clicked', view.currentStep, {
+        destination_step_id: back.currentStep,
+      });
+      setView(back);
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 400)) {
         setError(err instanceof Error ? err.message : String(err));
@@ -124,7 +146,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     const params = new URLSearchParams(window.location.search);
     const created = await api.startSession(funnelKey, readUtm(), params.get('variant'));
     localStorage.setItem(SESSION_KEY(funnelKey), created.sessionId);
-    tracker.track(created.sessionId, 'session_started', null, { restart: true });
+    tracker.track(created.sessionId, 'session_started');
     viewedRef.current = null;
     setView(created);
   }, [funnelKey]);
@@ -154,7 +176,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     );
   }
 
-  const done = view.completed || view.currentStep === RESULT;
+  const done = view.completed || step?.type === 'result';
 
   return (
     <div className="shell">
@@ -165,56 +187,42 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
         {view.utm.utm_campaign && <span className="pill ghost">{view.utm.utm_campaign}</span>}
       </div>
 
-      {!done && (
-        <div className="progress" aria-label={`Step ${view.progress.position} of ${view.progress.total}`}>
+      {!done && view.progress.total > 0 && (
+        <div
+          className="progress"
+          aria-label={`Question ${view.progress.position} of ${view.progress.total}`}
+        >
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${view.progress.percent}%` }} />
           </div>
           <span className="progress-label">
-            Step {view.progress.position} of {view.progress.total}
+            Question {view.progress.position} of {view.progress.total}
           </span>
         </div>
       )}
 
       <div className="card">
         {done ? (
-          <ResultScreen view={view} onRestart={restart} />
+          <ResultScreen view={view} onRestart={restart} onBack={goBack} />
         ) : (
           step && (
             <>
-              <h1>{step.title}</h1>
-              {step.subtitle && <p className="subtitle">{step.subtitle}</p>}
-
-              {step.help && (
-                <div className="help">
-                  <button
-                    type="button"
-                    className="link"
-                    onClick={() => {
-                      const opening = !helpOpen;
-                      setHelpOpen(opening);
-                      // A new event type, introduced by a config version alone.
-                      if (opening) tracker.track(view.sessionId, 'help_opened', step.id, { surface: 'inline_help' });
-                    }}
-                  >
-                    {helpOpen ? 'Hide help' : 'Need help with this?'}
-                  </button>
-                  {helpOpen && <p className="help-body">{step.help}</p>}
-                </div>
-              )}
+              {step.content.eyebrow && <div className="eyebrow">{step.content.eyebrow}</div>}
+              <h1>{step.content.title}</h1>
+              {step.content.helperText && <p className="subtitle">{step.content.helperText}</p>}
 
               <StepInput step={step} value={draft} onChange={setDraft} onSubmit={submit} />
 
               {fieldError && <p className="field-error">{fieldError}</p>}
 
               <div className="actions">
-                {view.history.length > 0 && (
+                {view.canGoBack && (
                   <button type="button" className="btn ghost" onClick={goBack} disabled={busy}>
                     Back
                   </button>
                 )}
                 <button type="button" className="btn primary" onClick={submit} disabled={busy}>
-                  {step.type === 'info' ? (step.continueLabel ?? 'Continue') : 'Continue'}
+                  {step.content.primaryActionLabel ?? 'Continue'}
                 </button>
               </div>
             </>
@@ -230,37 +238,65 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
   );
 }
 
-function currentStep(view: SessionView): Step | null {
-  return view.config.steps.find((s) => s.id === view.currentStep) ?? null;
-}
+function ResultScreen({
+  view,
+  onRestart,
+  onBack,
+}: {
+  view: SessionView;
+  onRestart: () => void;
+  onBack: () => void;
+}) {
+  const result = view.result;
 
-function ResultScreen({ view, onRestart }: { view: SessionView; onRestart: () => void }) {
-  const result = view.config.result;
+  if (!result) {
+    const step = view.funnel.steps.find((s) => s.type === 'result');
+    return (
+      <>
+        <h1>{step?.content.errorTitle ?? 'We could not build the recommendation'}</h1>
+        <div className="actions">
+          <button type="button" className="btn primary" onClick={onRestart}>
+            {step?.content.retryLabel ?? 'Try again'}
+          </button>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
-      <div className="result-badge">Done</div>
+      <div className="result-badge">Your recommendation</div>
       <h1>{result.title}</h1>
-      {result.body && <p className="subtitle">{result.body}</p>}
-      {result.bullets && (
+      {result.summary && <p className="subtitle">{result.summary}</p>}
+      {result.recommendations && result.recommendations.length > 0 && (
         <ul className="bullets">
-          {result.bullets.map((b) => (
-            <li key={b}>{b}</li>
+          {result.recommendations.map((r) => (
+            <li key={r}>{r}</li>
           ))}
         </ul>
       )}
       <div className="actions">
+        {view.canGoBack && (
+          <button type="button" className="btn ghost" onClick={onBack}>
+            Back
+          </button>
+        )}
         <button type="button" className="btn ghost" onClick={onRestart}>
           Start again
         </button>
-        <a
+        <button
+          type="button"
           className="btn primary"
-          href={result.cta.href ?? '#'}
           onClick={() =>
-            tracker.track(view.sessionId, 'cta_clicked', result.id, { cta_id: result.cta.id })
+            // Declared properties for cta_clicked: result_id, action.
+            tracker.track(view.sessionId, 'cta_clicked', view.currentStep, {
+              result_id: result.id,
+              action: result.cta.action,
+            })
           }
         >
           {result.cta.label}
-        </a>
+        </button>
       </div>
     </>
   );
@@ -272,80 +308,71 @@ function StepInput({
   onChange,
   onSubmit,
 }: {
-  step: Step;
+  step: StepDef;
   value: AnswerValue;
   onChange: (v: AnswerValue) => void;
   onSubmit: () => void;
 }) {
   if (step.type === 'info') {
-    return (
-      <>
-        {step.body && <p className="body">{step.body}</p>}
-        {step.bullets && (
-          <ul className="bullets">
-            {step.bullets.map((b) => (
-              <li key={b}>{b}</li>
-            ))}
-          </ul>
-        )}
-      </>
-    );
+    return step.content.body ? <p className="body">{step.content.body}</p> : null;
   }
 
   if (step.type === 'number') {
+    const input = step.input;
     return (
       <div className="number-field">
-        {step.unit && <span className="unit">{step.unit}</span>}
         <input
           type="number"
           inputMode="numeric"
           value={value === null || value === undefined ? '' : String(value)}
-          min={step.min}
-          max={step.max}
-          step={step.step}
-          placeholder={step.placeholder}
+          min={input?.min}
+          max={input?.max}
+          step={input?.step}
           onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
           onKeyDown={(e) => {
             if (e.key === 'Enter') onSubmit();
           }}
           autoFocus
         />
+        {input?.unit && <span className="unit">{input.unit}</span>}
       </div>
     );
   }
 
-  const select = step as SelectStep;
+  const options = step.input?.options ?? [];
+  const isMulti = step.type === 'multi-select';
   const selected = Array.isArray(value) ? value : value === null ? [] : [String(value)];
+  const max = step.validation?.maxSelections;
 
   return (
-    <div className="options" role={step.type === 'single_select' ? 'radiogroup' : 'group'}>
-      {select.options.map((option) => {
-        const isSelected = selected.includes(option.id);
+    <div className="options" role={isMulti ? 'group' : 'radiogroup'}>
+      {options.map((option) => {
+        const isSelected = selected.includes(option.value);
         return (
           <button
-            key={option.id}
+            key={option.value}
             type="button"
             className={`option ${isSelected ? 'selected' : ''}`}
             aria-pressed={isSelected}
             onClick={() => {
-              if (step.type === 'single_select') {
-                onChange(option.id);
+              if (!isMulti) {
+                onChange(option.value);
                 return;
               }
-              const max = select.maxSelected ?? select.options.length;
-              if (isSelected) onChange(selected.filter((id) => id !== option.id));
-              else if (selected.length < max) onChange([...selected, option.id]);
+              if (isSelected) onChange(selected.filter((v) => v !== option.value));
+              else if (max === undefined || selected.length < max) {
+                onChange([...selected, option.value]);
+              }
             }}
           >
             <span className="option-label">{option.label}</span>
-            {option.hint && <span className="option-hint">{option.hint}</span>}
             <span className="option-mark" aria-hidden="true" />
           </button>
         );
       })}
-      {step.type === 'multi_select' && select.maxSelected && (
+      {isMulti && max !== undefined && (
         <p className="muted small">
-          Choose up to {select.maxSelected}. Selected {selected.length}.
+          Choose up to {max}. Selected {selected.length}.
         </p>
       )}
     </div>

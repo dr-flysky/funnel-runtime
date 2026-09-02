@@ -13,7 +13,8 @@
  */
 import { getDb, nowIso } from './db.ts';
 import { getSession } from './sessions.ts';
-import { isValidEventType } from '@shared/funnel';
+import { getVersionById, parseConfig } from './versions.ts';
+import { allowedEventNames, isValidEventName } from '@shared/funnel';
 
 export interface IncomingEvent {
   event_id?: unknown;
@@ -44,6 +45,23 @@ export interface IngestSummary {
 }
 
 const UUID_ISH = /^[A-Za-z0-9_:.-]{8,128}$/;
+
+/** Declared-event lookup, memoised per version (config rows are immutable). */
+const allowedCache = new Map<number, Set<string>>();
+
+function allowedForVersion(versionId: number): Set<string> {
+  const cached = allowedCache.get(versionId);
+  if (cached) return cached;
+  const row = getVersionById(versionId);
+  const names = row ? allowedEventNames(parseConfig(row)) : new Set<string>();
+  allowedCache.set(versionId, names);
+  return names;
+}
+
+/** Test helper: the cache outlives an in-memory database swap otherwise. */
+export function resetEventCaches(): void {
+  allowedCache.clear();
+}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -78,11 +96,11 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
 
   const insert = db.prepare(
     `INSERT OR IGNORE INTO events (
-       event_id, session_id, funnel_key, type, step_id, version_id, version, variant,
+       event_id, session_id, funnel_key, type, step_id, version_id, version, variant, experiment_id,
        client_ts, server_ts, client_seq,
        utm_source, utm_medium, utm_campaign, utm_content, utm_term,
        props_json, synthetic
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   for (const raw of batch) {
@@ -102,8 +120,8 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
       }
 
       const type = typeof raw.type === 'string' ? raw.type : '';
-      if (!isValidEventType(type)) {
-        results.push({ event_id: eventId, status: 'rejected', error: `Invalid event type "${type}".` });
+      if (!isValidEventName(type)) {
+        results.push({ event_id: eventId, status: 'rejected', error: `Invalid event name "${type}".` });
         recordRejection(eventId, 'invalid_type', raw);
         continue;
       }
@@ -113,6 +131,18 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
       if (!session) {
         results.push({ event_id: eventId, status: 'rejected', error: 'Unknown session_id.' });
         recordRejection(eventId, 'unknown_session', raw);
+        continue;
+      }
+
+      // The version a session is pinned to declares which events it may emit,
+      // so a new config version can introduce an event with no code change.
+      if (!allowedForVersion(session.version_id).has(type)) {
+        results.push({
+          event_id: eventId,
+          status: 'rejected',
+          error: `Event "${type}" is not declared by funnel version ${session.version}.`,
+        });
+        recordRejection(eventId, 'undeclared_event', raw);
         continue;
       }
 
@@ -135,6 +165,7 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
         session.version_id,
         session.version,
         session.variant,
+        session.experiment_id,
         asIsoOrNull(raw.client_ts),
         nowIso(),
         clientSeq,

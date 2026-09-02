@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { openDb, setDb } from '../server/db.ts';
+import { resetEventCaches } from '../server/events.ts';
 import { publishVersion, type VersionSummary } from '../server/versions.ts';
 import { createApp } from '../server/app.ts';
 import type { FunnelConfig } from '@shared/funnel';
@@ -10,6 +11,9 @@ import type { FunnelConfig } from '@shared/funnel';
 /** Fresh in-memory database for each test, so nothing leaks between them. */
 export function useFreshDb(): void {
   setDb(openDb(':memory:'));
+  // Version ids restart from 1 in a new database, so the memoised
+  // declared-event lookup must not survive the swap.
+  resetEventCaches();
 }
 
 export function loadConfig(file: string): FunnelConfig {
@@ -17,12 +21,51 @@ export function loadConfig(file: string): FunnelConfig {
   return JSON.parse(fs.readFileSync(full, 'utf8')) as FunnelConfig;
 }
 
+export const FUNNEL = 'workstyle-planner';
+
 export function seedV1(): VersionSummary {
-  return publishVersion(loadConfig('v1-quickcash.json'), { note: 'test v1' });
+  return publishVersion(loadConfig('funnel-v1.json'), { note: 'test v1' });
+}
+
+/**
+ * A stand-in for the not-yet-supplied iteration-2 config, derived from v1 so
+ * the tests exercise the shapes iteration 2 is specified to introduce: a new
+ * conditional branch, a step dropped for one variant, and a new event.
+ */
+export function makeV2(): FunnelConfig {
+  const cfg = loadConfig('funnel-v1.json');
+
+  // 1. a new step behind a new condition
+  cfg.steps.meeting_load = {
+    id: 'meeting_load',
+    type: 'number',
+    content: { title: 'How many hours a week go to meetings?' },
+    input: { name: 'meeting_load', min: 0, max: 40, step: 1, unit: 'hours' },
+    validation: { required: true, messages: { required: 'Enter the meeting load.' } },
+    visibleWhen: { answer: 'async_maturity', operator: 'in', value: ['low', 'medium'] },
+  };
+
+  // 2. variant A gains it; variant B drops `tool_count` entirely
+  const A = cfg.experiment.variants.A;
+  const B = cfg.experiment.variants.B;
+  A.stepSequence = A.stepSequence.flatMap((id) =>
+    id === 'tool_count' ? ['meeting_load', 'tool_count'] : [id],
+  );
+  B.stepSequence = B.stepSequence.filter((id) => id !== 'tool_count');
+
+  // 3. a new event type, declared by the config alone
+  cfg.events!.allowed!.push({
+    name: 'help_opened',
+    trigger: 'The user opens inline help on a step.',
+    properties: ['surface'],
+  });
+
+  cfg.version = 2;
+  return cfg;
 }
 
 export function publishV2(): VersionSummary {
-  return publishVersion(loadConfig('v2-quickcash.json'), { note: 'test v2' });
+  return publishVersion(makeV2(), { note: 'test v2' });
 }
 
 export interface TestServer {

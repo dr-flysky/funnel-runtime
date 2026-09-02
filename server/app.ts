@@ -29,7 +29,7 @@ import {
 import { buildReport } from './analytics.ts';
 import type { FunnelConfig } from '@shared/funnel';
 
-const DEFAULT_FUNNEL = process.env.DEFAULT_FUNNEL_KEY ?? 'quickcash';
+const DEFAULT_FUNNEL = process.env.DEFAULT_FUNNEL_KEY ?? 'workstyle-planner';
 
 function asString(v: unknown): string | null {
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
@@ -79,7 +79,7 @@ export function createApp(): express.Express {
         return {
           key,
           activeVersion: active?.version ?? null,
-          name: active ? parseConfig(active).name : key,
+          name: active ? parseConfig(active).title : key,
         };
       }),
     });
@@ -246,9 +246,15 @@ export function createApp(): express.Express {
       .map((f) => {
         try {
           const cfg = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as FunnelConfig;
-          return { file: f, key: cfg.key, name: cfg.name, steps: cfg.steps?.length ?? 0 };
+          return {
+            file: f,
+            key: cfg.funnelId,
+            name: cfg.title,
+            steps: Object.keys(cfg.steps ?? {}).length,
+            sourceVersion: cfg.version ?? null,
+          };
         } catch {
-          return { file: f, key: null, name: 'unparseable', steps: 0 };
+          return { file: f, key: null, name: 'unparseable', steps: 0, sourceVersion: null };
         }
       });
     res.json({ files });

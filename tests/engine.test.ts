@@ -1,238 +1,347 @@
 /**
- * The pure engine: branching, variant resolution, validation and the progress
- * rule that only counts steps the user can actually reach.
+ * The pure engine against the supplied config: variant resolution, visibility
+ * branching, result rules, validation, and the progress policy.
  */
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from './helpers.ts';
+import { loadConfig, makeV2 } from './helpers.ts';
 import {
-  RESULT,
   computeProgress,
   configErrors,
   firstStepId,
   nextStepId,
-  numericBucket,
-  reachablePath,
-  resolveVariantConfig,
+  previousStepId,
+  resolveResultId,
+  resolveVariant,
   stepById,
   summariseAnswer,
   validateAnswer,
   validateConfig,
+  visibleSteps,
   type Answers,
   type FunnelConfig,
-  type NumberStep,
-  type SelectStep,
+  type ResolvedFunnel,
 } from '@shared/funnel';
 
-const v1 = loadConfig('v1-quickcash.json');
-const v2 = loadConfig('v2-quickcash.json');
-const cardmatch = loadConfig('v1-cardmatch.json');
+const v1 = loadConfig('funnel-v1.json');
 
-function walk(config: FunnelConfig, answers: Answers): string[] {
+/** Walk the whole funnel with a fixed answer set, returning the step ids seen. */
+function walk(funnel: ResolvedFunnel, answers: Answers): string[] {
   const path: string[] = [];
-  let cursor = firstStepId(config);
+  let cursor = firstStepId(funnel, answers);
   let guard = 0;
-  while (cursor !== RESULT && guard < 50) {
+  while (cursor && guard < 50) {
     path.push(cursor);
-    cursor = nextStepId(config, cursor, answers);
+    cursor = nextStepId(funnel, cursor, answers);
     guard += 1;
   }
   return path;
 }
 
 describe('config validation', () => {
-  it('accepts every config shipped in the repo', () => {
+  it('accepts the supplied config with no errors or warnings', () => {
     expect(configErrors(v1)).toEqual([]);
-    expect(configErrors(v2)).toEqual([]);
-    expect(configErrors(cardmatch)).toEqual([]);
+    expect(validateConfig(v1).filter((i) => i.level === 'warning')).toEqual([]);
   });
 
-  it('requires at least six screens and one branch', () => {
-    const short = { ...v1, steps: v1.steps.slice(0, 3) };
-    expect(configErrors(short as FunnelConfig).join(' ')).toMatch(/at least 6 screens/);
-
-    const linear = {
-      ...v1,
-      steps: v1.steps.map((s) => ({ ...s, next: undefined })),
-    };
-    expect(configErrors(linear as FunnelConfig).join(' ')).toMatch(/conditional branch/);
+  it('rejects a result rule pointing at a result that does not exist', () => {
+    const broken = structuredClone(v1) as FunnelConfig;
+    broken.resultRules![0].resultId = 'no_such_result';
+    expect(configErrors(broken).join(' ')).toMatch(/unknown result "no_such_result"/);
   });
 
-  it('warns when a branch has no default transition', () => {
-    const risky = JSON.parse(JSON.stringify(v1)) as FunnelConfig;
-    (risky.steps[1] as any).next = [
-      { when: { all: [{ field: 'goal', op: 'eq', value: 'business' }] }, goto: 'amount' },
+  it('rejects a defaultResultId that is not defined', () => {
+    const broken = structuredClone(v1) as FunnelConfig;
+    broken.defaultResultId = 'missing';
+    expect(configErrors(broken).join(' ')).toMatch(/defaultResultId "missing"/);
+  });
+
+  it('rejects a stepSequence naming an unknown step', () => {
+    const broken = structuredClone(v1) as FunnelConfig;
+    broken.experiment.variants.A.stepSequence.push('ghost_step');
+    expect(configErrors(broken).join(' ')).toMatch(/sequences unknown step "ghost_step"/);
+  });
+
+  it('rejects a variant whose sequence has no result step', () => {
+    const broken = structuredClone(v1) as FunnelConfig;
+    broken.experiment.variants.B.stepSequence =
+      broken.experiment.variants.B.stepSequence.filter((id) => id !== 'result');
+    expect(configErrors(broken).join(' ')).toMatch(/no result step/);
+  });
+
+  /**
+   * The important one: `visibleWhen` reads an answer, so the step that supplies
+   * that answer must come earlier in *this variant's* order. Otherwise the
+   * predicate silently evaluates against an absent answer and the step vanishes.
+   */
+  it('rejects a visibleWhen gated on an answer collected later in the sequence', () => {
+    const broken = structuredClone(v1) as FunnelConfig;
+    // Move office_days before work_mode, which gates it.
+    broken.experiment.variants.A.stepSequence = [
+      'intro', 'office_days', 'work_mode', 'team_size', 'priorities',
+      'timezone_span', 'async_maturity', 'tool_count', 'result',
     ];
-    const warnings = validateConfig(risky).filter((i) => i.level === 'warning');
-    expect(warnings.some((w) => /no default transition/.test(w.message))).toBe(true);
-  });
-});
-
-describe('conditional branching', () => {
-  it('routes business intent through the revenue question', () => {
-    const A = resolveVariantConfig(v1, 'A');
-    const path = walk(A, { goal: 'business', amount: 10000, income: 3000 });
-    expect(path).toContain('business_revenue');
-    expect(path).not.toContain('low_income_notice');
+    expect(configErrors(broken).join(' ')).toMatch(/gated on "work_mode", which comes later/);
   });
 
-  it('routes low income to the affordability notice and skips the credit questions', () => {
-    const A = resolveVariantConfig(v1, 'A');
-    const path = walk(A, { goal: 'home_improvement', amount: 5000, income: 900 });
-    expect(path).toContain('low_income_notice');
-    expect(path).not.toContain('credit_band');
-    expect(path).not.toContain('employment');
-  });
-
-  it('adds the refinance branch in v2 only', () => {
-    const a1 = resolveVariantConfig(v1, 'A');
-    const a2 = resolveVariantConfig(v2, 'A');
-    const answers = { goal: 'debt_consolidation', amount: 8000, income: 3000 };
-
-    expect(walk(a1, answers)).not.toContain('refinance_details');
-    expect(walk(a2, answers)).toContain('refinance_details');
-  });
-
-  it('handles the cardmatch balance-transfer branch', () => {
-    const A = resolveVariantConfig(cardmatch, 'A');
-    expect(walk(A, { card_use: 'balance_transfer', monthly_spend: 500 })).toContain('existing_balance');
-    expect(walk(A, { card_use: 'rewards', monthly_spend: 500 })).not.toContain('existing_balance');
-    expect(walk(A, { card_use: 'rewards', monthly_spend: 3000 })).toContain('premium_notice');
+  it('rejects a config with fewer than six screens', () => {
+    const broken = structuredClone(v1) as FunnelConfig;
+    broken.steps = { intro: broken.steps.intro, result: broken.steps.result };
+    expect(configErrors(broken).join(' ')).toMatch(/at least 6 screens/);
   });
 });
 
 describe('variant resolution', () => {
-  it('reorders steps for the amount-first variant', () => {
-    const A = resolveVariantConfig(v1, 'A');
-    const B = resolveVariantConfig(v1, 'B');
-    expect(A.steps[1].id).toBe('goal');
-    expect(B.steps[1].id).toBe('amount');
-    expect(walk(B, { goal: 'home_improvement', amount: 5000, income: 3000 })[1]).toBe('amount');
+  it('orders steps by the variant stepSequence', () => {
+    const A = resolveVariant(v1, 'A');
+    const B = resolveVariant(v1, 'B');
+
+    expect(A.steps.map((s) => s.id)).toEqual([
+      'intro', 'team_size', 'work_mode', 'priorities',
+      'timezone_span', 'office_days', 'async_maturity', 'tool_count', 'result',
+    ]);
+    expect(B.steps.map((s) => s.id)).toEqual([
+      'intro', 'work_mode', 'timezone_span', 'team_size',
+      'async_maturity', 'priorities', 'office_days', 'tool_count', 'result',
+    ]);
   });
 
-  it('removes a step for variant B and repairs the transitions into it', () => {
-    const B = resolveVariantConfig(v2, 'B');
-    expect(B.steps.some((s) => s.id === 'preferences')).toBe(false);
+  it('deep-merges stepOverrides without dropping untouched fields', () => {
+    const A = resolveVariant(v1, 'A');
+    const B = resolveVariant(v1, 'B');
 
-    // `employment` and `low_income_notice` both pointed at `preferences`.
-    expect(nextStepId(B, 'employment', {})).toBe(RESULT);
-    expect(nextStepId(B, 'low_income_notice', {})).toBe(RESULT);
+    expect(A.steps[0].content.title).toBe('Build a work model your team can actually follow');
+    expect(B.steps[0].content.title).toBe('How should your team really work?');
+    expect(B.steps[0].content.primaryActionLabel).toBe('Show me');
 
-    const path = walk(B, { goal: 'home_improvement', amount: 5000, income: 3000 });
-    expect(path).not.toContain('preferences');
-    expect(path[path.length - 1]).toBe('employment');
+    // priorities is overridden for B in content only; its validation survives.
+    const bPriorities = stepById(B, 'priorities')!;
+    expect(bPriorities.content.title).toBe('What would make the biggest difference right now?');
+    expect(bPriorities.validation?.maxSelections).toBe(3);
+    expect(bPriorities.input?.options).toHaveLength(5);
   });
 
-  it('keeps variant A untouched when B removes a step', () => {
-    const A = resolveVariantConfig(v2, 'A');
-    expect(A.steps.some((s) => s.id === 'preferences')).toBe(true);
-    expect(walk(A, { goal: 'home_improvement', amount: 5000, income: 3000 })).toContain('preferences');
+  it('applies resultOverrides per variant', () => {
+    const A = resolveVariant(v1, 'A');
+    const B = resolveVariant(v1, 'B');
+
+    expect(A.results.async_native.title).toBe('Async-native');
+    expect(B.results.async_native.title).toBe('Your team is ready to reduce meetings');
+    expect(B.results.async_native.cta.label).toBe('See the 30-day action list');
+    // Untouched fields survive the merge.
+    expect(B.results.async_native.recommendations).toHaveLength(3);
   });
 
-  it('merges the result-screen override without losing untouched fields', () => {
-    const B = resolveVariantConfig(v1, 'B');
-    expect(B.result.title).toBe('Your indicative offer is ready');
-    // href was not overridden, so it survives from the base config.
-    expect(B.result.cta.href).toBe('#offers');
-    expect(B.result.cta.label).toBe('See my offer');
+  it('falls back to a defined variant instead of throwing on an unknown one', () => {
+    const unknown = resolveVariant(v1, 'Z');
+    expect(unknown.steps.length).toBeGreaterThan(0);
+    expect(['A', 'B']).toContain(unknown.variant);
+  });
+});
+
+describe('conditional visibility', () => {
+  it('hides office_days for a fully remote team', () => {
+    const A = resolveVariant(v1, 'A');
+    const path = walk(A, { work_mode: 'remote', async_maturity: 'low' });
+    expect(path).not.toContain('office_days');
   });
 
-  it('falls back to the base config for an unknown variant instead of throwing', () => {
-    const unknown = resolveVariantConfig(v1, 'Z');
-    expect(unknown.steps).toHaveLength(v1.steps.length);
+  it('shows office_days for hybrid and office teams', () => {
+    const A = resolveVariant(v1, 'A');
+    expect(walk(A, { work_mode: 'hybrid' })).toContain('office_days');
+    expect(walk(A, { work_mode: 'office' })).toContain('office_days');
+  });
+
+  it('skips the hidden step when navigating forward', () => {
+    const A = resolveVariant(v1, 'A');
+    const remote = { work_mode: 'remote' };
+    expect(nextStepId(A, 'timezone_span', remote)).toBe('async_maturity');
+
+    const hybrid = { work_mode: 'hybrid' };
+    expect(nextStepId(A, 'timezone_span', hybrid)).toBe('office_days');
+  });
+
+  it('skips the hidden step when navigating back', () => {
+    const A = resolveVariant(v1, 'A');
+    expect(previousStepId(A, 'async_maturity', { work_mode: 'remote' })).toBe('timezone_span');
+    expect(previousStepId(A, 'async_maturity', { work_mode: 'hybrid' })).toBe('office_days');
+  });
+
+  it('recomputes visibility when an earlier answer changes', () => {
+    const A = resolveVariant(v1, 'A');
+    const before = visibleSteps(A, { work_mode: 'hybrid' }).map((s) => s.id);
+    const after = visibleSteps(A, { work_mode: 'remote' }).map((s) => s.id);
+
+    expect(before).toContain('office_days');
+    expect(after).not.toContain('office_days');
+    expect(before.length).toBe(after.length + 1);
+  });
+
+  it('returns null at the end of the funnel', () => {
+    const A = resolveVariant(v1, 'A');
+    expect(nextStepId(A, 'result', {})).toBeNull();
+    expect(previousStepId(A, 'intro', {})).toBeNull();
+  });
+});
+
+describe('result rules', () => {
+  const A = resolveVariant(v1, 'A');
+
+  it('matches the first rule that passes, in config order', () => {
+    // Remote + wide timezones satisfies the first branch of async_native.
+    expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'wide' })).toBe('async_native');
+    // High async maturity satisfies the second branch on its own, and
+    // async_native is listed first, so it wins over hybrid_structured.
+    expect(resolveResultId(A, { work_mode: 'hybrid', async_maturity: 'high' })).toBe('async_native');
+  });
+
+  it('falls through to later rules', () => {
+    expect(resolveResultId(A, { work_mode: 'hybrid', async_maturity: 'low' })).toBe('hybrid_structured');
+    expect(resolveResultId(A, { work_mode: 'office', async_maturity: 'low' })).toBe('office_core');
+  });
+
+  it('uses defaultResultId when nothing matches', () => {
+    expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'same', async_maturity: 'low' }))
+      .toBe('balanced');
+    expect(resolveResultId(A, {})).toBe('balanced');
+  });
+
+  it('evaluates nested any/all trees correctly', () => {
+    // remote + same hours fails the `all`, and low maturity fails the `any`.
+    expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'same', async_maturity: 'medium' }))
+      .toBe('balanced');
+    // remote + global hours satisfies the `all`.
+    expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'global', async_maturity: 'low' }))
+      .toBe('async_native');
   });
 });
 
 describe('progress', () => {
-  it('counts only steps the user can still reach', () => {
-    const A = resolveVariantConfig(v1, 'A');
-
-    // Low income cuts out credit_band and employment.
-    const lowIncome = computeProgress(A, 'low_income_notice', { income: 900 }, ['intro', 'goal', 'amount', 'income']);
-    // Normal income keeps them.
-    const normal = computeProgress(A, 'credit_band', { income: 4000 }, ['intro', 'goal', 'amount', 'income']);
-
-    expect(lowIncome.total).toBeLessThan(normal.total);
-    expect(lowIncome.total).toBe(6); // 4 behind + notice + preferences
-    expect(normal.total).toBe(7); // 4 behind + credit_band + employment + preferences
+  it('excludes info and result screens from the count', () => {
+    const A = resolveVariant(v1, 'A');
+    // Variant A hybrid path: 7 questions (intro and result are excluded).
+    const p = computeProgress(A, 'team_size', { work_mode: 'hybrid' });
+    expect(p.total).toBe(7);
   });
 
-  it('never exceeds 100% and reaches 100% at the result', () => {
-    const A = resolveVariantConfig(v1, 'A');
-    const done = computeProgress(A, RESULT, {}, ['intro', 'goal', 'amount', 'income']);
-    expect(done.percent).toBe(100);
+  it('counts only the steps this user can reach', () => {
+    const A = resolveVariant(v1, 'A');
+    const hybrid = computeProgress(A, 'team_size', { work_mode: 'hybrid' });
+    const remote = computeProgress(A, 'team_size', { work_mode: 'remote' });
 
-    const mid = computeProgress(A, 'goal', {}, ['intro']);
-    expect(mid.percent).toBeGreaterThanOrEqual(0);
-    expect(mid.percent).toBeLessThan(100);
+    // Remote hides office_days, so the denominator shrinks by one.
+    expect(hybrid.total).toBe(7);
+    expect(remote.total).toBe(6);
   });
 
-  it('does not double-count a step already in history', () => {
-    const A = resolveVariantConfig(v1, 'A');
-    const p = computeProgress(A, 'goal', {}, ['intro', 'goal']);
-    expect(p.position).toBe(2);
+  it('advances position and percent through the funnel', () => {
+    const A = resolveVariant(v1, 'A');
+    const answers = { work_mode: 'remote' };
+
+    const first = computeProgress(A, 'team_size', answers);
+    const later = computeProgress(A, 'async_maturity', answers);
+
+    expect(first.position).toBe(1);
+    expect(first.percent).toBe(0);
+    expect(later.position).toBeGreaterThan(first.position);
+    expect(later.percent).toBeGreaterThan(first.percent);
+    expect(later.percent).toBeLessThanOrEqual(100);
   });
 
-  it('gives a stable estimate before a branch is decided', () => {
-    const A = resolveVariantConfig(v1, 'A');
-    const path = reachablePath(A, 'income', {});
-    expect(path[0]).toBe('income');
-    expect(path.length).toBeGreaterThan(1);
+  it('reports visible index and count for the step_viewed event', () => {
+    const A = resolveVariant(v1, 'A');
+    const p = computeProgress(A, 'intro', { work_mode: 'remote' });
+    expect(p.visibleIndex).toBe(0);
+    // intro + 6 questions + result
+    expect(p.visibleCount).toBe(8);
   });
 });
 
 describe('answer validation', () => {
-  const goal = stepById(v1, 'goal') as SelectStep;
-  const amount = stepById(v1, 'amount') as NumberStep;
-  const preferences = stepById(v1, 'preferences') as SelectStep;
+  const A = resolveVariant(v1, 'A');
+  const teamSize = stepById(A, 'team_size')!;
+  const workMode = stepById(A, 'work_mode')!;
+  const priorities = stepById(A, 'priorities')!;
 
-  it('accepts a known option and rejects an unknown one', () => {
-    expect(validateAnswer(goal, 'business').ok).toBe(true);
-    expect(validateAnswer(goal, 'not_an_option').ok).toBe(false);
-    expect(validateAnswer(goal, undefined).ok).toBe(false);
+  it('uses the message text the config supplies', () => {
+    expect(validateAnswer(teamSize, null)).toEqual({
+      ok: false,
+      error: 'Enter the team size.',
+    });
+    expect(validateAnswer(teamSize, 0).error).toBe('The team must have at least one person.');
+    expect(validateAnswer(teamSize, 500).error).toBe('For this demo, enter a value up to 200.');
+    expect(validateAnswer(workMode, null).error).toBe("Select the team's main work mode.");
+    expect(validateAnswer(priorities, []).error).toBe('Choose at least one priority.');
+    expect(validateAnswer(priorities, ['speed', 'focus', 'cost', 'culture']).error).toBe(
+      'Choose no more than three priorities.',
+    );
   });
 
-  it('enforces numeric bounds and coerces numeric strings', () => {
-    expect(validateAnswer(amount, 10000)).toMatchObject({ ok: true, value: 10000 });
-    expect(validateAnswer(amount, '12000')).toMatchObject({ ok: true, value: 12000 });
-    expect(validateAnswer(amount, 500).ok).toBe(false);
-    expect(validateAnswer(amount, 999999).ok).toBe(false);
-    expect(validateAnswer(amount, 'abc').ok).toBe(false);
+  it('accepts valid answers and coerces numeric strings', () => {
+    expect(validateAnswer(teamSize, 12)).toEqual({ ok: true, value: 12 });
+    expect(validateAnswer(teamSize, '12')).toEqual({ ok: true, value: 12 });
+    expect(validateAnswer(workMode, 'hybrid')).toEqual({ ok: true, value: 'hybrid' });
+    expect(validateAnswer(priorities, ['speed', 'focus'])).toEqual({
+      ok: true,
+      value: ['speed', 'focus'],
+    });
   });
 
-  it('enforces min and max selections on a multi-select', () => {
-    expect(validateAnswer(preferences, ['lowest_rate']).ok).toBe(true);
-    expect(validateAnswer(preferences, ['lowest_rate', 'no_fees']).ok).toBe(true);
-    expect(validateAnswer(preferences, []).ok).toBe(false);
-    expect(validateAnswer(preferences, ['lowest_rate', 'no_fees', 'fast_payout']).ok).toBe(false);
-    expect(validateAnswer(preferences, ['lowest_rate', 'lowest_rate']).ok).toBe(false);
+  it('rejects unknown options and duplicates', () => {
+    expect(validateAnswer(workMode, 'hovercraft').ok).toBe(false);
+    expect(validateAnswer(priorities, ['speed', 'speed']).ok).toBe(false);
+    expect(validateAnswer(teamSize, 'not a number').ok).toBe(false);
   });
 
-  it('treats an info screen as always valid', () => {
-    const intro = stepById(v1, 'intro')!;
-    expect(validateAnswer(intro, null).ok).toBe(true);
+  it('treats info and result screens as always valid', () => {
+    expect(validateAnswer(stepById(A, 'intro')!, null).ok).toBe(true);
+    expect(validateAnswer(stepById(A, 'result')!, null).ok).toBe(true);
   });
 });
 
 describe('analytics-safe answer summaries', () => {
-  it('keeps config-defined option ids but buckets free numeric input', () => {
-    const amount = stepById(v1, 'amount') as NumberStep;
-    const goal = stepById(v1, 'goal') as SelectStep;
+  it('emits the answer kind and nothing else', () => {
+    const A = resolveVariant(v1, 'A');
 
-    expect(summariseAnswer(goal, 'business')).toEqual({
-      answer_kind: 'single_select',
-      option_id: 'business',
-    });
+    // The config sets events.privacy.storeRawAnswers to false and declares
+    // answer_submitted with exactly one property: answer_kind.
+    expect(summariseAnswer(stepById(A, 'work_mode')!)).toEqual({ answer_kind: 'single_select' });
+    expect(summariseAnswer(stepById(A, 'priorities')!)).toEqual({ answer_kind: 'multi_select' });
+    expect(summariseAnswer(stepById(A, 'team_size')!)).toEqual({ answer_kind: 'number' });
 
-    const summary = summariseAnswer(amount, 27350) as Record<string, unknown>;
-    expect(summary.answer_kind).toBe('number');
-    // The exact figure the user typed must not appear.
-    expect(JSON.stringify(summary)).not.toContain('27350');
-    expect(typeof summary.bucket).toBe('string');
+    // No value, bucket or option id may leak into the payload.
+    const keys = Object.keys(summariseAnswer(stepById(A, 'team_size')!));
+    expect(keys).toEqual(['answer_kind']);
+  });
+});
+
+describe('a v2-shaped config', () => {
+  const v2 = makeV2();
+
+  it('validates', () => {
+    expect(configErrors(v2)).toEqual([]);
   });
 
-  it('buckets monotonically', () => {
-    const amount = stepById(v1, 'amount') as NumberStep;
-    expect(numericBucket(amount, 1000)).not.toBe(numericBucket(amount, 49000));
-    expect(numericBucket(amount, null)).toBe('unknown');
+  it('adds a step behind a new condition for variant A only', () => {
+    const A = resolveVariant(v2, 'A');
+    const B = resolveVariant(v2, 'B');
+
+    expect(A.steps.some((s) => s.id === 'meeting_load')).toBe(true);
+    expect(walk(A, { work_mode: 'remote', async_maturity: 'low' })).toContain('meeting_load');
+    expect(walk(A, { work_mode: 'remote', async_maturity: 'high' })).not.toContain('meeting_load');
+    expect(B.steps.some((s) => s.id === 'meeting_load')).toBe(false);
+  });
+
+  it('drops a step for variant B by omitting it from the sequence', () => {
+    const A = resolveVariant(v2, 'A');
+    const B = resolveVariant(v2, 'B');
+
+    expect(A.steps.some((s) => s.id === 'tool_count')).toBe(true);
+    expect(B.steps.some((s) => s.id === 'tool_count')).toBe(false);
+
+    // Omission cannot strand the user: the sequence is linear, so the step
+    // after the removed one simply becomes next.
+    const path = walk(B, { work_mode: 'remote', async_maturity: 'low' });
+    expect(path).not.toContain('tool_count');
+    expect(path[path.length - 1]).toBe('result');
   });
 });
