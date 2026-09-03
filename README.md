@@ -1,170 +1,187 @@
 # Funnel Runtime
 
-A platform for running, versioning and analysing multi-step web funnels. Screens
-are not hardcoded anywhere: the frontend renders whatever JSON config the backend
-hands it, and the backend decides every transition.
+Платформа для запуска, версионирования и анализа многошаговых веб-воронок. Экраны
+нигде не захардкожены: фронтенд рисует тот JSON-конфиг, который ему отдал бэкенд,
+а все переходы решает бэкенд.
 
-It runs the supplied `funnel-v1.json` (`schemaVersion` 1.0) **natively** — the
-JSON that is published is the JSON that is stored and executed, with no
-translation layer in between.
+Присланный `funnel-v1.json` (`schemaVersion` 1.0) исполняется **нативно** — какой
+JSON опубликован, такой и хранится, и такой и выполняется, без промежуточного
+слоя перевода.
 
-**Stack:** TypeScript everywhere · React 18 + Vite · Node.js + Express · SQLite
-via the built-in `node:sqlite` · Vitest. One repository, no third-party services,
-no native build step.
+**Стек:** TypeScript везде · React 18 + Vite · Node.js + Express · SQLite через
+встроенный `node:sqlite` · Vitest. Один репозиторий, никаких сторонних сервисов,
+никакой нативной сборки.
 
 ---
 
-## Quick start
+## Быстрый старт
+
+Нужен **Node 22.5+** — из-за встроенного модуля `node:sqlite`.
 
 ```bash
 npm install
-npm run seed              # publish configs/funnel-v1.json
-npm run dev               # API on :3000, client on :5173 (proxied)
+npm run seed              # публикует configs/funnel-v1.json
+npm run dev               # API на :3000, клиент на :5173 (через прокси)
 ```
 
-Open <http://localhost:5173>.
+Открыть <http://localhost:5173>.
 
-| Route | What it is |
+| Маршрут | Что это |
 | --- | --- |
-| `/` | the funnel itself |
-| `/admin` | publish, activate and roll back versions |
-| `/dashboard` | analytics |
+| `/` | сама воронка |
+| `/admin` | публикация, активация и откат версий |
+| `/dashboard` | аналитика |
 
-`?variant=A|B` forces a variant (the config names this parameter in
-`experiment.overrideQueryParam`); `?utm_campaign=…` tags a session.
+`?variant=A|B` принудительно задаёт вариант (имя параметра объявлено в конфиге,
+`experiment.overrideQueryParam`); `?utm_campaign=…` размечает сессию.
 
-### Fill it with data
+### Наполнить данными
 
 ```bash
-npm run generate:traffic            # 140 synthetic sessions, deterministic
+npm run generate:traffic                    # 140 синтетических сессий, детерминированно
 npm run generate:traffic -- 300 --seed=7
 ```
 
-### Other commands
+### Остальные команды
 
 ```bash
-npm test              # 91 tests
+npm test              # 91 тест
 npm run typecheck
-npm run build         # bundle the client into dist/client
-npm start             # single process serving API + built client on :3000
+npm run build         # сборка клиента в dist/client
+npm start             # один процесс: API + собранный клиент на :3000
 npm run publish -- configs/funnel-v2.example.json
-npm run rollback      # roll back to the previously active version
+npm run rollback      # откат на предыдущую активную версию
 ```
 
-Requires **Node 22.5+** for `node:sqlite`.
+### Переменные окружения
 
----
-
-## The config schema
-
-The supplied config drives everything. The engine implements its model directly:
-
-| Config key | What the runtime does with it |
+| Переменная | Назначение |
 | --- | --- |
-| `steps` | An object keyed by step id. Types: `info`, `number`, `single-select`, `multi-select`, `result`. |
-| `experiment.variants[x].stepSequence` | The full ordered step list for that variant. **This is where ordering lives** — there are no per-step `next` pointers. |
-| `experiment.variants[x].stepOverrides` | Deep-merged per-step patches (variant B's intro and priorities copy). |
-| `experiment.variants[x].resultOverrides` | Deep-merged per-result patches (variant B's result titles and CTA). |
-| `steps[x].visibleWhen` | A condition tree. A step whose predicate is false is simply not shown. |
-| `resultRules` + `defaultResultId` | Ordered rules; first match wins, default catches the rest. |
-| `validation.messages` | Error copy comes from the config. The engine never invents text when the config supplies it. |
-| `progress.countVisibleOnly` / `excludeTypes` | The progress denominator: visible steps only, excluding `info` and `result`. |
-| `session.ttlHours` | 72h. A session past its TTL is not resumed. |
-| `events.allowed` | Which event names a version may emit, and the properties each carries. |
-| `events.privacy.storeRawAnswers` | `false` — see **Privacy** below. |
+| `PORT` | порт HTTP-сервера (по умолчанию `3000`) |
+| `DB_FILE` | путь к файлу SQLite (по умолчанию `data/funnel.db`) |
+| `DEFAULT_FUNNEL_KEY` | воронка по умолчанию, если в запросе не указана (`workstyle-planner`) |
+| `ADMIN_TOKEN` | если задан, изменяющие admin-роуты требуют `x-admin-token` или basic auth |
+| `SEED_TRAFFIC` | сколько сессий сгенерировать при первом старте (для хостов без диска) |
 
-### Branching by visibility, not by graph edges
-
-This is the design decision that shapes the whole engine. A variant supplies a
-linear `stepSequence`; a step carries `visibleWhen`; the visible path is the
-sequence filtered by those predicates, recomputed from the current answers on
-every request.
-
-That model **cannot produce an unreachable step or a dangling pointer**, so the
-engine needs no transition-repair logic and no reachability analysis. Changing an
-earlier answer takes effect immediately — going back and switching `work_mode`
-from `hybrid` to `remote` makes `office_days` disappear with no bookkeeping.
-
-The one hazard it *does* have is ordering: a `visibleWhen` that reads an answer
-collected **later** in its own variant's sequence silently evaluates against an
-absent answer, and the step vanishes for everybody. `validateConfig` rejects that
-at publish time, per variant, so it can never reach production.
+Тексты интерфейса приложения (навигация, кнопки, дашборд) — на русском и лежат в
+`client/src/strings.ts`. Тексты **самой воронки** приходят из конфига; у
+присланного `funnel-v1.json` `locale: en-AU`, поэтому вопросы и результаты
+отображаются на английском. Перевести воронку — значит опубликовать переведённый
+конфиг, а не править код.
 
 ---
 
-## How the pieces fit
+## Схема конфига
 
-```
-shared/funnel.ts     pure engine: variant resolution, visibility, result rules,
-                     validation, progress, config validation. Imported by client,
-                     server and tests, so navigation cannot drift between them.
+Конфиг управляет всем. Движок реализует его модель напрямую:
 
-server/versions.ts   immutable version store + the active-version pointer
-server/sessions.ts   session lifecycle; the server owns navigation
-server/events.ts     batch ingest: idempotent, partially-failing, order-agnostic
-server/analytics.ts  aggregation over unique sessions
-client/src/          funnel runner, admin, dashboard
-```
-
-The server is authoritative for navigation. The client sends an answer and is
-told where it now is; it never computes the next step. That is what makes Back,
-refresh and reopening the tab lossless — the browser holds nothing but a session
-id.
-
----
-
-## Data model
-
-| Table | Purpose |
+| Ключ конфига | Что с ним делает рантайм |
 | --- | --- |
-| `funnel_versions` | **Immutable.** One row per published version holding the full config JSON, plus `source_version` (the version the file declared for itself). |
-| `funnel_active` | Mutable pointer: which version new sessions start on. |
-| `version_activations` | Audit log of every publish / activate / rollback. |
-| `sessions` | Pins `version_id`, `variant` and `experiment_id` at creation, plus UTM tags. |
-| `session_state` | Current step, completion flag, resolved `result_id`. |
-| `session_answers` | **Raw answers — this table only.** |
-| `events` | The analytics store. `event_id` is the primary key. |
-| `event_rejections` | Malformed events, kept rather than dropped silently. |
-| `ingest_counters` | Running tallies of received / accepted / duplicate / rejected. |
+| `steps` | Объект по id шага. Типы: `info`, `number`, `single-select`, `multi-select`, `result`. |
+| `experiment.variants[x].stepSequence` | Полный упорядоченный список шагов варианта. **Порядок живёт здесь** — никаких `next` у отдельных шагов нет. |
+| `experiment.variants[x].stepOverrides` | Патчи по шагам, глубокое слияние (интро и `priorities` у варианта B). |
+| `experiment.variants[x].resultOverrides` | Патчи по результатам, глубокое слияние (заголовки результатов и CTA у B). |
+| `steps[x].visibleWhen` | Дерево условий. Шаг с ложным предикатом просто не показывается. |
+| `resultRules` + `defaultResultId` | Упорядоченные правила: выигрывает первое подошедшее, остальных ловит значение по умолчанию. |
+| `validation.messages` | Тексты ошибок берутся из конфига. Движок не выдумывает текст, если конфиг его дал. |
+| `progress.countVisibleOnly` / `excludeTypes` | Знаменатель прогресса: только видимые шаги, без `info` и `result`. |
+| `session.ttlHours` | 72 часа. Сессия за пределами TTL не возобновляется. |
+| `events.allowed` | Какие имена событий версия вправе отправлять и какие свойства несёт каждое. |
+| `events.privacy.storeRawAnswers` | `false` — см. раздел **Приватность**. |
 
-Two decisions carry most of the weight:
+### Ветвление по видимости, а не по рёбрам графа
 
-**Config rows are immutable and sessions hold a foreign key to one.** Publishing
-appends; it never rewrites. A session that started on v1 keeps resolving v1's
-config forever, and a rollback is a pointer move rather than a migration. No
-schema change is needed to publish a new version, because the version *is* data.
-The platform's `version` column is authoritative for pinning; the file's own
-`version` field is preserved separately as `source_version`.
+Это решение определяет весь движок. Вариант задаёт линейный `stepSequence`, у
+шага есть `visibleWhen`, а видимый путь — это последовательность,
+отфильтрованная предикатами и пересчитываемая по текущим ответам на каждом
+запросе.
 
-**Navigation state is not a history stack.** Because the model is a linear
-sequence plus visibility predicates, the previous step is *computed*
-(`previousStepId`) rather than stored. There is no history to keep in sync with
-the answers, so editing an earlier answer cannot leave a stale trail behind.
+Такая модель **не может породить недостижимый шаг или висящий указатель**,
+поэтому движку не нужны ни починка переходов, ни анализ достижимости. Изменение
+раннего ответа действует сразу: вернуться назад и переключить `work_mode` с
+`hybrid` на `remote` — и `office_days` исчезает без всякого учёта состояния.
 
-### Privacy
-
-`events.privacy.storeRawAnswers: false` and `session.persistAnswers: true` are
-both honoured, and they are not in conflict:
-
-- Raw answers are written to `session_answers` and nowhere else. The funnel needs
-  them — `visibleWhen` and `resultRules` read them.
-- `answer_submitted` carries **only `answer_kind`**, exactly the one property the
-  config declares for it. Not the chosen option, not the number, not a bucket. A
-  test asserts the payload has that single key, so a future change that starts
-  leaking values fails the suite rather than shipping.
+Единственная реальная опасность здесь — порядок. `visibleWhen`, читающий ответ,
+который в его же варианте собирается **позже**, молча вычисляется по
+отсутствующему ответу, и шаг пропадает у всех. `validateConfig` отклоняет такое
+на публикации, отдельно по каждому варианту, поэтому в прод это не попадёт.
 
 ---
 
-## Event schema
+## Как устроен проект
 
-Base properties on every event, matching `events.baseProperties`:
-`event_id`, `session_id`, `client_timestamp` (+ a server timestamp),
+```
+shared/funnel.ts     чистый движок: варианты, видимость, правила результата,
+                     валидация, прогресс, валидация конфига. Импортируется
+                     клиентом, сервером и тестами — навигация не может разъехаться.
+
+server/versions.ts   неизменяемое хранилище версий + указатель активной
+server/sessions.ts   жизненный цикл сессии; навигацией владеет сервер
+server/events.ts     батчевый приём: идемпотентный, с частичными отказами,
+                     безразличный к порядку
+server/analytics.ts  агрегация по уникальным сессиям
+client/src/          сама воронка, админка, дашборд
+```
+
+За навигацию отвечает сервер. Клиент отправляет ответ, и ему сообщают, где он
+теперь находится; следующий шаг он не вычисляет никогда. Именно поэтому «назад»,
+обновление страницы и переоткрытие вкладки ничего не теряют — браузер хранит
+только id сессии.
+
+---
+
+## Модель данных
+
+| Таблица | Назначение |
+| --- | --- |
+| `funnel_versions` | **Неизменяемая.** Одна строка на опубликованную версию с полным JSON конфига и `source_version` (версия, которую файл объявил сам о себе). |
+| `funnel_active` | Изменяемый указатель: с какой версии стартуют новые сессии. |
+| `version_activations` | Журнал всех публикаций / активаций / откатов. |
+| `sessions` | Фиксирует `version_id`, `variant` и `experiment_id` при создании, плюс UTM-метки. |
+| `session_state` | Текущий шаг, флаг завершения, вычисленный `result_id`. |
+| `session_answers` | **Сырые ответы — только эта таблица.** |
+| `events` | Хранилище событий. `event_id` — первичный ключ. |
+| `event_rejections` | Битые события: сохраняются, а не теряются молча. |
+| `ingest_counters` | Счётчики принято / принято успешно / дублей / отклонено. |
+
+Основную нагрузку несут два решения:
+
+**Строки конфигов неизменяемы, а сессия держит на одну из них внешний ключ.**
+Публикация добавляет, но никогда не переписывает. Сессия, стартовавшая на v1,
+навсегда остаётся на конфиге v1, а откат — это сдвиг указателя, а не миграция.
+Для публикации новой версии не нужно менять схему БД, потому что версия — это
+данные. Для закрепления авторитетна колонка `version` платформы; собственное поле
+`version` из файла сохраняется отдельно как `source_version`.
+
+**Состояние навигации — не стек истории.** Модель линейна и дополнена
+предикатами видимости, поэтому предыдущий шаг *вычисляется* (`previousStepId`), а
+не хранится. Синхронизировать историю с ответами не нужно, и правка раннего
+ответа не оставляет за собой устаревший след.
+
+### Приватность
+
+`events.privacy.storeRawAnswers: false` и `session.persistAnswers: true`
+соблюдаются оба и друг другу не противоречат:
+
+- Сырые ответы пишутся в `session_answers` и больше никуда. Воронке они нужны:
+  их читают `visibleWhen` и `resultRules`.
+- `answer_submitted` несёт **только `answer_kind`** — ровно то единственное
+  свойство, которое объявил конфиг. Ни выбранный вариант, ни число, ни корзина.
+  Тест проверяет, что в payload ровно один ключ, поэтому изменение, начавшее
+  протекать значениями, свалит сборку, а не уедет в прод.
+
+---
+
+## Схема событий
+
+Базовые свойства каждого события, согласно `events.baseProperties`:
+`event_id`, `session_id`, `client_timestamp` (плюс серверная метка времени),
 `funnel_id`, `funnel_version`, `experiment_id`, `variant`, `step_id`,
 `utm_source`, `utm_medium`, `utm_campaign`.
 
-Per-event properties, exactly as declared:
+Свойства по событиям, ровно как объявлено:
 
-| Event | Properties |
+| Событие | Свойства |
 | --- | --- |
 | `session_started` | — |
 | `step_viewed` | `step_type`, `visible_step_index`, `visible_step_count` |
@@ -173,399 +190,442 @@ Per-event properties, exactly as declared:
 | `back_clicked` | `destination_step_id` |
 | `result_viewed` | `result_id` |
 | `cta_clicked` | `result_id`, `action` |
-| `help_opened` | `surface` — declared by v2 only, not by the shipped v1 |
+| `help_opened` | `surface` — объявлено только в v2, в присланном v1 его нет |
 
-**The CTA performs its declared action.** Every result in the supplied config
-names `expand_recommendation`, so the recommendation list is *withheld* until
-the CTA is pressed — which is what makes `cta_clicked` a real conversion signal
-rather than a decorative click, and what the primary metric is measuring. An
-action the client does not implement still records the click and falls back to
-revealing the recommendation, and `validateConfig` warns at publish time so a
-dead button cannot ship unnoticed.
+**CTA выполняет то действие, которое объявил конфиг.** Все результаты присланного
+конфига называют `expand_recommendation`, поэтому список рекомендаций
+*придерживается* до нажатия CTA — именно это делает `cta_clicked` настоящим
+сигналом конверсии, а не декоративным кликом, и именно это меряет основная
+метрика. Незнакомое клиенту действие всё равно фиксирует клик и раскрывает
+рекомендацию, а `validateConfig` предупреждает на публикации, чтобы мёртвая
+кнопка не уехала незамеченной.
 
-**Inline help is config-driven on two independent switches.** A question showing
-`content.body` gets a "What does this mean?" toggle; the toggle emits
-`help_opened` only when the session's own version declares that event. So a
-config can add help copy without inventing an event, or declare the event and
-start measuring, and neither needs a client release. The resolved funnel carries
-`allowedEvents` for exactly this. The supplied v1 config has no help copy on any
-question and does not declare the event, so nothing changes for it.
+**Встроенная подсказка управляется конфигом через два независимых переключателя.**
+У вопроса с `content.body` появляется переключатель «Что это значит?»; событие
+`help_opened` он отправляет, только если версия этой сессии его объявила. Значит,
+конфиг может добавить текст подсказки, не изобретая события, или объявить событие
+и начать мерить — и ни то ни другое не требует релиза клиента. Ради этого
+разрешённая воронка несёт `allowedEvents`. У присланного v1 подсказок нет и
+событие не объявлено, так что для него ничего не меняется.
 
-`funnel_version`, `variant`, `experiment_id` and the UTM tags are taken from the
-**session row**, never from the request body, so a stale or tampered client
-cannot mislabel its own events.
+`funnel_version`, `variant`, `experiment_id` и UTM-метки берутся из **строки
+сессии**, а не из тела запроса, поэтому устаревший или подделанный клиент не
+может переразметить собственные события.
 
-### Ingest invariants
+### Инварианты приёма
 
-`POST /api/events` takes `{ events: [...] }`, up to 500 at a time, and returns a
-verdict per event — `accepted`, `duplicate` or `rejected`:
+`POST /api/events` принимает `{ events: [...] }`, до 500 штук за раз, и
+возвращает вердикт по каждому событию — `accepted`, `duplicate` или `rejected`:
 
-- **Deduplication** — `event_id` is the primary key; ingest is `INSERT OR IGNORE`.
-  Resending is free.
-- **Safe retry** — replaying a whole batch after a timeout is deduplication N
-  times. The response is always 200 when the envelope parses, so a retrying
-  client never spins on a permanently-bad payload.
-- **Partial failure** — each event is validated on its own. A malformed sibling
-  is rejected and recorded in `event_rejections`; the rest still land.
-- **Version-scoped event names** — an event is accepted if the config version the
-  session is pinned to declares it. A **new config version can introduce an event
-  with no migration and no server change**; a session on an older version is
-  correctly told the event is not declared for it.
+- **Дедупликация** — `event_id` является первичным ключом, вставка идёт как
+  `INSERT OR IGNORE`. Повторная отправка ничего не стоит.
+- **Безопасный ретрай** — повтор целого батча после таймаута это дедупликация
+  N раз. Если конверт разобран, ответ всегда 200, поэтому ретраящийся клиент не
+  зацикливается на навсегда испорченном payload.
+- **Частичный отказ** — каждое событие валидируется само по себе. Битый сосед
+  отклоняется и попадает в `event_rejections`, остальные сохраняются.
+- **Имена событий привязаны к версии** — событие принимается, если его объявила
+  та версия конфига, к которой привязана сессия. **Новая версия конфига вводит
+  событие без миграции и без правок сервера**, а сессии на старой версии
+  корректно сообщается, что для неё событие не объявлено.
 
 ---
 
-## Aggregation rules
+## Правила агрегации
 
-Three rules, applied everywhere in `server/analytics.ts`:
+Три правила, применяемые везде в `server/analytics.ts`:
 
-**1. Count sessions, not events.** Every metric is `COUNT(DISTINCT session_id)`.
-A user who re-views a step ten times, or whose client retries a batch, moves no
-metric.
+**1. Считаем сессии, а не события.** Каждая метрика — это
+`COUNT(DISTINCT session_id)`. Пользователь, десять раз посмотревший шаг, и
+клиент, повторивший батч, не двигают ни одну метрику.
 
-**2. Never read events as a sequence.** Nothing sorts by timestamp to decide what
-happened. An event that arrives late lands in exactly the same set as one that
-arrives on time, so out-of-order delivery is not a special case.
+**2. Никогда не читаем события как последовательность.** Ничто не сортируется по
+времени, чтобы решить, что произошло. Опоздавшее событие попадает ровно в то же
+множество, что и пришедшее вовремя, поэтому доставка не по порядку не является
+особым случаем.
 
-**3. Per-step conversion is `step_completed / step_viewed`.** The server only
-emits `step_completed` when it actually advanced the user, so this is a true
-step-to-step conversion that stays correct under branching. Comparing a step
-against its neighbour in sequence order would be meaningless when `office_days`
-is invisible to a third of users — much of the apparent "drop-off" would just be
-people who were never shown it.
+**3. Конверсия шага — это `step_completed / step_viewed`.** Сервер отправляет
+`step_completed`, только если действительно продвинул пользователя, поэтому это
+честная конверсия «шаг в шаг», остающаяся верной при ветвлении. Сравнение шага с
+соседом по порядку было бы бессмысленным: `office_days` не виден трети
+пользователей, и большая часть мнимого «отвала» была бы просто теми, кому его не
+показывали.
 
-Derived from those:
+Производные величины:
 
 - `dropOff` = `reached − completed`
 - `reachFromStart` = `reached / startedSessions`
-- `viewsPerSession` = total `step_viewed` / `reached` — surfaces repeat views
-- `resultRate` = result sessions / started sessions
-- `ctaCtrOnResult` = CTA sessions / result sessions
-- `ctaClickRate` = CTA sessions / started sessions ← **primary metric**
-- **Result distribution** — which of the four recommendations each session
-  reached, from the `result_id` property, by unique session
+- `viewsPerSession` = всего `step_viewed` / `reached` — показывает повторные просмотры
+- `resultRate` = сессии с результатом / начавшие сессии
+- `ctaCtrOnResult` = сессии с CTA / сессии с результатом
+- `ctaClickRate` = сессии с CTA / начавшие сессии ← **основная метрика**
+- **Распределение результатов** — к какой из четырёх рекомендаций пришла сессия,
+  по свойству `result_id`, по уникальным сессиям
 
-**Step ordering in the report** is a genuine ambiguity: variants A and B order
-their questions differently, so there is no single true order. The report takes
-the first variant's sequence as the backbone and appends anything only other
-variants or older versions ask, so no step's numbers ever silently vanish.
+**Порядок шагов в отчёте** — настоящая неоднозначность: варианты A и B
+упорядочивают вопросы по-разному, единого истинного порядка нет. Отчёт берёт за
+основу последовательность первого варианта и дописывает всё, что просят только
+другие варианты или старые версии, чтобы ничьи цифры не пропали молча.
 
-Segments re-run the same query with an extra filter, so `byVariant` and
-`byVersion` always sum to `overall`. Sessions whose variant came from the
-`?variant=` test hatch are **excluded by default**; pass `includeOverrides=true`
-to see them.
+Сегменты выполняют тот же запрос с дополнительным фильтром, поэтому `byVariant` и
+`byVersion` всегда складываются в `overall`. Сессии, чей вариант пришёл из
+тестового `?variant=`, **по умолчанию исключены**; чтобы увидеть их, передайте
+`includeOverrides=true`.
 
-The dashboard's **Data quality** panel splits into two groups, because they
-behave differently under a filter. *Current selection* — total events, distinct
-sessions, out-of-order arrivals and repeat step views — narrows with the
-campaign and version filters like every other metric. *All ingest* — duplicates
-suppressed and events rejected — cannot: neither ever became a row, so there is
-nothing left to attribute to a campaign or a version. The panel labels them
-rather than showing them beside filtered numbers as if they narrowed too.
-
----
-
-## The A/B experiment
-
-**Assignment** is server-side and stable twice over: a pure function of
-`(experiment.id, sessionId)` via FNV-1a, *and* persisted on the session row at
-creation. Refresh, resume, a publish or a rollback can never move a session
-between variants. This satisfies `assignment: "server"` and `sticky: true`.
-
-### Hypothesis — `question-order-and-result-framing-v1`
-
-Variant B changes two things at once:
-
-1. **Order.** It leads with `work_mode` and `timezone_span` — two taps — and
-   defers `team_size`, which requires typing a number.
-2. **Result framing.** Result titles become outcome statements ("Your team is
-   ready to reduce meetings" rather than "Async-native") and the CTA becomes
-   specific ("See the 30-day action list" rather than "View the action list").
-
-> **Hypothesis.** Opening with low-effort recognition questions rather than a
-> numeric entry reduces first-question abandonment, and naming a concrete
-> deliverable on the result screen converts more of the people who get there. We
-> expect B to lift end-to-end click-through.
-
-**Primary metric:** `cta_click_rate` — unique sessions with `cta_clicked` divided
-by unique sessions with `session_started`.
-
-It is the primary metric because it is the only one spanning the whole journey.
-Per-step conversion can be gamed by moving a hard question later — which is
-precisely what B does — and result-reaching can be gamed by asking less. Only
-"started, and ultimately clicked through" captures whether the change produced
-more genuinely engaged people.
-
-**Guardrails.** `resultRate` (is B moving drop-off around rather than removing
-it?) and the **result distribution** (B must not shift which recommendation
-people receive — the questions are merely reordered, so the mix should be stable;
-if it moves, the reordering is changing answers, not just their sequence).
-
-Because B changes order *and* copy, a win does not attribute to one of them.
-That is a deliberate trade for one experiment's worth of traffic, and a follow-up
-would split them.
-
-**On reading the numbers:** the dashboard shows a directional lift and says so. A
-few hundred synthetic sessions is not a powered experiment, and the generator's
-outcomes are random rather than modelled on the hypothesis — the plumbing is what
-is demonstrated, not a result.
+Панель **Качество данных** на дашборде разделена на две группы, потому что они
+по-разному ведут себя под фильтром. *Текущая выборка* — всего событий,
+уникальных сессий, пришедших не по порядку и повторных просмотров шага —
+сужается фильтрами по кампании и версии, как и все прочие метрики. *Весь приём* —
+подавленные дубли и отклонённые события — не сужается: ни то ни другое не стало
+строкой, поэтому отнести их не к чему. Панель подписывает их отдельно, а не
+показывает рядом с отфильтрованными числами, будто они тоже сузились.
 
 ---
 
-## Iteration 2
+## A/B-эксперимент
 
-The real iteration-2 config has not been supplied yet. To prove the flow works
-end to end, `configs/funnel-v2.example.json` is a **stand-in** derived from v1
-that exercises exactly the three changes iteration 2 specifies:
+**Назначение** происходит на сервере и стабильно дважды: это чистая функция от
+`(experiment.id, sessionId)` через FNV-1a, *и* результат записан в строку сессии
+при её создании. Обновление страницы, возобновление, публикация или откат не
+могут перевести сессию в другой вариант. Это соответствует `assignment: "server"`
+и `sticky: true`. Веса вариантов — 50/50.
 
-- **a new conditional branch** — `meeting_load`, visible only when
-  `async_maturity` is `low` or `medium`
-- **a step removed for one variant** — variant B drops `tool_count` by omitting
-  it from its `stepSequence`
-- **a new event** — `help_opened`, declared in `events.allowed`, with help copy
-  added to two steps so the client renders the affordance that produces it
+Порядок вопросов в вариантах:
+
+```
+A:  intro → team_size → work_mode → priorities → timezone_span → office_days → async_maturity → tool_count → result
+B:  intro → work_mode → timezone_span → team_size → async_maturity → priorities → office_days → tool_count → result
+```
+
+### Гипотеза — `question-order-and-result-framing-v1`
+
+Вариант B меняет сразу две вещи:
+
+1. **Порядок.** Он начинает с `work_mode` и `timezone_span` — это два касания —
+   и откладывает `team_size`, где нужно вводить число.
+2. **Формулировка результата.** Заголовки результатов становятся утверждениями
+   об итоге («Ваша команда готова сократить количество встреч» вместо
+   «Async-native»), а CTA — конкретным («Посмотреть план действий на 30 дней»
+   вместо «Посмотреть список действий»).
+
+> **Гипотеза.** Если начинать с лёгких вопросов на узнавание, а не с ввода числа,
+> отказ на первом вопросе снизится; а если назвать на экране результата
+> конкретный артефакт, доля дошедших и кликнувших вырастет. Ожидаем, что B даст
+> прирост сквозной конверсии в клик.
+
+**Основная метрика:** `cta_click_rate` — уникальные сессии с `cta_clicked`,
+делённые на уникальные сессии с `session_started`.
+
+Она основная, потому что это единственная метрика, охватывающая весь путь.
+Пошаговую конверсию можно «улучшить», перенеся трудный вопрос дальше, — а именно
+это B и делает; долю дошедших до результата — спрашивая меньше. Только «начал и в
+итоге кликнул» показывает, стало ли действительно вовлечённых людей больше.
+
+**Защитные метрики (guardrails).** `resultRate` — не переносит ли B отвал с места
+на место вместо того, чтобы его убрать; и **распределение результатов** — B не
+должен сдвигать то, какую рекомендацию получают люди: вопросы всего лишь
+переставлены, поэтому состав должен остаться прежним. Если он поехал, значит
+перестановка меняет сами ответы, а не только их порядок.
+
+Поскольку B меняет и порядок, и формулировки, победа не атрибутируется чему-то
+одному. Это сознательный размен на объём трафика одного эксперимента; следующий
+шаг — разделить их.
+
+**Как читать числа:** дашборд показывает направление изменения и честно об этом
+пишет. Несколько сотен синтетических сессий — это не эксперимент с достаточной
+мощностью, а исходы генератора случайны и не смоделированы под гипотезу.
+Демонстрируется работающая инфраструктура, а не результат.
+
+---
+
+## Итерация 2
+
+Настоящий конфиг итерации 2 пока не прислан. Чтобы доказать работоспособность
+процесса от начала до конца, `configs/funnel-v2.example.json` — это
+**замена-заглушка**, выведенная из v1 и воспроизводящая ровно те три изменения,
+которые заявлены для итерации 2:
+
+- **новая ветка по условию** — `meeting_load`, видимый, только когда
+  `async_maturity` равен `low` или `medium`;
+- **шаг, убранный у одного варианта** — вариант B теряет `tool_count`, просто не
+  упоминая его в своём `stepSequence`;
+- **новое событие** — `help_opened`, объявленное в `events.allowed`, плюс тексты
+  подсказок у двух шагов, чтобы клиент отрисовал кнопку, которая его порождает.
 
 ```bash
 npm run publish -- configs/funnel-v2.example.json
 npm run rollback
 ```
 
-Verified by hand and by `tests/version-pinning.test.ts`:
+Проверено руками и тестом `tests/version-pinning.test.ts`:
 
 | | |
 | --- | --- |
-| Sessions started before the publish | keep running on v1, including their config, and still advance |
-| New sessions | start on v2 and see the new branch |
-| Variant B on v2 | never sees `tool_count`; omission from a linear sequence cannot strand anyone |
-| `help_opened` | emitted by the client and the generator on v2; accepted on v2, rejected on v1, with no migration |
-| After rollback | new sessions get v1; v2 sessions stay on v2; **both versions' analytics remain** and are comparable |
+| Сессии, начатые до публикации | продолжают работать на v1, со своим конфигом, и по-прежнему двигаются дальше |
+| Новые сессии | стартуют на v2 и видят новую ветку |
+| Вариант B на v2 | никогда не видит `tool_count`; пропуск шага в линейной последовательности не создаёт тупика |
+| `help_opened` | отправляется клиентом и генератором на v2; принимается на v2, отклоняется на v1, без миграций |
+| После отката | новые сессии получают v1, сессии на v2 остаются на v2, **аналитика обеих версий сохраняется** и сравнима |
 
-Swapping in the real file should need no code change. Anything it exercises that
-the engine lacks would be the interesting finding — the most likely candidates
-are a new step `type`, a new condition `operator`, or a `resultSource` other than
-`resultRules`.
+Подстановка настоящего файла не должна потребовать правок кода. Интересной
+находкой станет всё, чего движок не умеет: вероятнее всего это новый `type` шага,
+новый `operator` условия или `resultSource`, отличный от `resultRules`.
 
 ---
 
-## Tests
+## Тесты
 
 ```bash
-npm test    # 80 tests, ~1.5s
+npm test    # 91 тест, ~1.8 с
 ```
 
-| File | Covers |
+| Файл | Что покрывает |
 | --- | --- |
-| `engine.test.ts` | variant resolution and deep merge, visibility branching, result rules, progress policy, config-supplied validation messages, answer-kind-only summaries |
-| `version-pinning.test.ts` | version pinned per session; publish and rollback don't move live sessions |
-| `ab-stability.test.ts` | variant stable across resume; override honoured; even split; per-variant configs |
-| `event-ingest.test.ts` | dedup, batching, timeout replay, partial failure, session-sourced labels, version-scoped event names |
-| `publish-rollback.test.ts` | publish, activate, roll back, audit trail, invalid configs refused |
-| `analytics.test.ts` | hand-countable scenarios for every metric under duplicates, Back and out-of-order arrival |
-| `session-expiry.test.ts` | an expired session is refused by every route, not served as a view that cannot be submitted |
+| `engine.test.ts` | разрешение вариантов и глубокое слияние, ветвление по видимости, правила результата, политика прогресса, тексты валидации из конфига, сводки только по виду ответа |
+| `version-pinning.test.ts` | версия закреплена за сессией; публикация и откат не двигают живые сессии |
+| `ab-stability.test.ts` | вариант стабилен при возобновлении, override соблюдается, деление примерно поровну, конфиги по вариантам |
+| `event-ingest.test.ts` | дедупликация, батчи, повтор после таймаута, частичный отказ, метки из строки сессии, имена событий по версии |
+| `publish-rollback.test.ts` | публикация, активация, откат, журнал, отказ невалидным конфигам |
+| `analytics.test.ts` | сценарии с ручным подсчётом для каждой метрики при дублях, «назад» и приходе не по порядку |
+| `session-expiry.test.ts` | протухшая сессия отклоняется всеми роутами, а не отдаётся как экран, который нельзя отправить |
 
-The analytics tests deliberately build tiny scenarios where the right answer is
-obvious by inspection — three sessions see a step, one gets past it, so drop-off
-is two — rather than asserting whatever the implementation happens to return.
-
----
-
-## Traffic generator
-
-`scripts/generate-traffic.ts` boots the real app on an ephemeral port and drives
-it over HTTP, so ingest, validation and navigation are genuinely exercised rather
-than bypassed by writing rows directly. Seeded, so a given seed reproduces the
-same traffic. Events carry exactly the properties the config declares.
-
-It produces by construction: both variants; six UTM campaigns; every branch,
-including the hidden `office_days` step and all four results; drop-off spread
-across steps; Back-then-forward loops that create repeat step views; whole
-batches resent after a simulated timeout; adjacent events swapped so they arrive
-out of order; and malformed events mixed into valid batches.
-
-A representative run of 140 sessions: ~2,700 events sent, ~250 duplicates
-suppressed, ~27 malformed rejected with siblings intact, ~127 arriving out of
-order, all four recommendations reached.
+Тесты аналитики специально строят крошечные сценарии, где правильный ответ виден
+глазами — три сессии видят шаг, одна проходит дальше, значит отвал равен двум, —
+вместо того чтобы фиксировать то, что вернула реализация.
 
 ---
 
-## Deployment
+## Генератор трафика
 
-One `Dockerfile`, deployed to Railway. `railway.toml` sits at the repo root;
-`deploy/render.yaml` is kept as a working alternative for the same image. Both
-mount a volume at `/data` so the SQLite file survives deploys, and
-`scripts/seed-if-empty.ts` publishes on first boot only — a redeploy never
-resets a live funnel.
+`scripts/generate-traffic.ts` поднимает настоящее приложение на случайном порту и
+ходит по нему по HTTP, поэтому приём событий, валидация и навигация реально
+задействованы, а не обойдены прямой записью строк. Генератор детерминирован: один
+и тот же seed даёт один и тот же трафик. События несут ровно те свойства, которые
+объявлены в конфиге.
+
+По построению он выдаёт: оба варианта; шесть UTM-кампаний; все ветки, включая
+скрытый шаг `office_days` и все четыре результата; отвал, размазанный по шагам;
+циклы «назад — вперёд», создающие повторные просмотры; целые батчи, переотправленные
+после имитации таймаута; переставленные соседние события, приходящие не по порядку;
+и битые события, подмешанные в валидные батчи.
+
+Показательный прогон на 140 сессиях: 2 599 событий отправлено, 2 155 принято,
+425 дублей подавлено, 19 битых отклонено с сохранением соседей, 107
+переставленных пар, достигнуты все четыре рекомендации.
+
+---
+
+## Развёртывание
+
+Один `Dockerfile`, деплой на Railway. `railway.toml` лежит в корне репозитория;
+`deploy/render.yaml` оставлен как рабочая альтернатива для того же образа. Оба
+монтируют том в `/data`, чтобы файл SQLite пережил деплой, а
+`scripts/seed-if-empty.ts` публикует конфиг только при первом старте — редеплой
+никогда не сбрасывает живую воронку.
 
 ```bash
 docker build -t funnel-runtime .
 docker run -p 3000:3000 -v funnel-data:/data funnel-runtime
 ```
 
-The `.dockerignore` is load-bearing, not tidiness. The Dockerfile runs `npm ci`
-and then `COPY . .`, so without it a local build copies the host's
-`node_modules` over the container's — esbuild and rollup ship per-platform
-binaries, so a Windows or macOS host replaces the Linux ones and the in-image
-`npm run build` fails. It also keeps the local SQLite file out, so the image
-always boots against an empty volume and seeds itself.
+`.dockerignore` здесь несущий, а не для порядка. Dockerfile выполняет `npm ci`, а
+затем `COPY . .`, поэтому без него локальная сборка перезапишет контейнерный
+`node_modules` хостовым: esbuild и rollup поставляют бинарники под платформу, и
+хост на Windows или macOS заменит линуксовые, после чего `npm run build` внутри
+образа упадёт. Заодно он не пускает в образ локальный файл SQLite, чтобы образ
+всегда стартовал с пустого тома и сам себя засеивал.
 
-**Railway** (the deployed instance) — `railway.toml` at the repo root pins the
-Dockerfile builder and `numReplicas = 1`. Connect the GitHub repo, then:
+**Railway** (развёрнутый экземпляр) — `railway.toml` в корне фиксирует сборщик
+Dockerfile и `numReplicas = 1`. Подключите GitHub-репозиторий, затем:
 
-1. **Add a volume** to the service, mounted at `/data`. Do this *before* the
-   first deploy, so the database is never written to the container filesystem.
-2. **Set the variables** — `DB_FILE=/data/funnel.db` and, for the first boot
-   only, `SEED_TRAFFIC=140`. Railway injects `PORT` itself and the server reads
-   it, so leave that alone.
-3. **Generate a domain** under Settings → Networking. Railway does not expose a
-   service publicly until you ask it to, which is the step most easily missed.
+1. **Добавьте том** к сервису, точка монтирования `/data`. Сделайте это *до*
+   первого деплоя, чтобы база никогда не писалась в файловую систему контейнера.
+2. **Задайте переменные** — `DB_FILE=/data/funnel.db` и, только для первого
+   старта, `SEED_TRAFFIC=140`. `PORT` Railway подставляет сам, и сервер его
+   читает, так что его трогать не нужно.
+3. **Сгенерируйте домен** в Settings → Networking. Railway не публикует сервис
+   наружу, пока об этом не попросят, — этот шаг пропускают чаще всего.
 
-`numReplicas = 1` is not a cost setting. The store is a SQLite file on one
-volume; a second replica would open its own copy and split version pinning,
-sessions and analytics across two databases that never reconcile — so any host
-used for this must be pinned to a single always-on instance.
+`numReplicas = 1` — это не экономия. Хранилище это файл SQLite на одном томе;
+вторая реплика открыла бы свою копию и разнесла закрепление версий, состояние
+сессий и аналитику по двум базам, которые никогда не сойдутся. Поэтому любой
+хост под этот проект должен быть закреплён на одном постоянно работающем
+экземпляре.
 
-**Render** — `deploy/render.yaml` provisions the web service and a 1GB disk at
-`/data`. Sign in with GitHub; the Docker runtime builds straight from the
-`Dockerfile`.
+**Render** — `deploy/render.yaml` создаёт веб-сервис и диск на 1 ГБ в `/data`.
+Вход через GitHub, среда Docker собирает прямо из `Dockerfile`.
 
-On the **free tier** there is no persistent disk, so drop the `disk:` block, set
-`plan: free`, and set `SEED_TRAFFIC` — the database is wiped on every spin-down,
-and without it a reviewer arriving after an idle period would find a working
-funnel with an empty dashboard:
+На **бесплатном тарифе** постоянного диска нет, поэтому уберите блок `disk:`,
+поставьте `plan: free` и задайте `SEED_TRAFFIC`: база стирается при каждом
+засыпании, и без этого проверяющий, зашедший после простоя, увидит работающую
+воронку с пустым дашбордом.
 
 ```
-SEED_TRAFFIC=140     # first boot republishes v1 and generates this many sessions
+SEED_TRAFFIC=140     # первый старт заново публикует v1 и генерирует столько сессий
 ```
 
-`scripts/seed-if-empty.ts` only does this when the database has no versions at
-all, so on a disk-backed plan it runs once and never again — real traffic
-accumulates from then on. Seeding is synchronous, so a cold start costs roughly
-20–60s before the port opens; that is well inside Render's deploy timeout, but
-it is why the value is `0` by default.
+`scripts/seed-if-empty.ts` делает это, только если в базе вообще нет версий,
+поэтому на тарифе с диском он отрабатывает один раз и больше никогда — дальше
+накапливается настоящий трафик. Засеивание синхронное, поэтому холодный старт
+стоит примерно 20–60 секунд до открытия порта; это заметно меньше таймаута
+деплоя на Render, но именно поэтому значение по умолчанию равно `0`.
 
-After the first boot, check `/api/health` (it lists the published funnels),
-then `/` for the funnel, `/admin` for versions and `/dashboard` for analytics.
-If you did not set `SEED_TRAFFIC`, walk the funnel a few times so the dashboard
-has something to show.
+После первого старта проверьте `/api/health` (он перечисляет опубликованные
+воронки), затем `/` — воронка, `/admin` — версии, `/dashboard` — аналитика. Если
+`SEED_TRAFFIC` не задавали, пройдите воронку несколько раз, чтобы дашборду было
+что показать.
 
-Set `ADMIN_TOKEN` to require `x-admin-token` (or HTTP basic auth) on the mutating
-admin routes. Unset, they are open — see the assumptions below.
+Переменная `ADMIN_TOKEN` включает требование `x-admin-token` (или basic auth) на
+изменяющих admin-роутах. Если она не задана, роуты открыты — см. допущения ниже.
 
 ---
 
-## Known limitations and assumptions
+## Известные ограничения и допущения
 
-**Confirmed with the client:**
+**Уточнено у заказчика:**
 
-1. **"No third-party services" does not ban hosting platforms** — asked and
-   answered *yes*, so managed hosting platforms are in scope. Nothing
-   else is outsourced: the event pipeline, experiment assignment, storage and
-   analytics are all built in this repo and run in this process.
+1. **«Без сторонних сервисов» не запрещает хостинг-платформы** — вопрос задан,
+   ответ *да*, поэтому управляемые платформы допустимы. Больше ничего наружу не
+   вынесено: конвейер событий, назначение варианта, хранилище и аналитика
+   написаны в этом репозитории и работают в этом же процессе.
 
-**Assumptions where the brief is still silent:**
+**Допущения там, где ТЗ молчит:**
 
-2. **Rollback does not migrate live sessions.** The brief specifies behaviour for
-   *publish* (old sessions continue on the old version) but not for *rollback*. I
-   apply the same rule in both directions: a session never moves across configs,
-   because the answers it already gave were validated against the config it
-   started on.
-3. **Variant is assigned per session**, matching `sticky: true` and the brief's
-   "stable within the session". There is no cross-session user identity, so a
-   returning visitor with cleared storage is a new session and may be re-bucketed.
-4. **Session state is server-side, keyed by a session id in `localStorage`.**
-   Refresh and reopening the tab resume perfectly; a different browser or device
-   does not, since there is no account to tie sessions together.
-   A session past the config's `session.ttlHours` (72) is **gone, not
-   resumable**: every route answers `410`, and the client drops the stored id
-   and starts a fresh session with a short explanation rather than rendering a
-   funnel that cannot be submitted. Answers from the expired session are not
-   carried over — they were validated against a config the new session may not
-   even be running.
-5. **Admin and dashboard routes are unauthenticated by default** so the deployed
-   URL can be reviewed without credentials. `ADMIN_TOKEN` gates the mutating
-   routes when set. Not a production posture.
-6. **Analytics counts sessions from `session_started` events**, not from session
-   rows — the event pipeline is the source of truth.
-7. **Override sessions are excluded from the experiment read-out by default.**
-8. **The platform owns version numbering.** The file's own `version` field is
-   recorded as `source_version` but the platform's sequence is what sessions pin
-   to, so publishing the same file twice yields two distinct versions rather than
-   a collision.
-9. **Two characters in the supplied `funnel-v1.json` arrived mojibaked** —
-   `"About 3â6 hours apart"` and `"Building your recommendationâ¦"`, a UTF-8
-   transfer artifact. I restored them to `3–6` and `…`. Worth confirming the
-   original file is clean at source.
+2. **Откат не мигрирует живые сессии.** ТЗ описывает поведение при *публикации*
+   (старые сессии продолжают на старой версии), но не при *откате*. Я применяю
+   то же правило в обе стороны: сессия никогда не переезжает между конфигами,
+   потому что уже данные ею ответы проверялись по тому конфигу, на котором она
+   началась.
+3. **Вариант назначается на сессию**, что соответствует `sticky: true` и
+   формулировке «стабилен в рамках сессии». Сквозной идентификации пользователя
+   нет, поэтому вернувшийся посетитель с очищенным хранилищем — это новая сессия,
+   и он может попасть в другой вариант.
+4. **Состояние сессии живёт на сервере, ключ — id сессии в `localStorage`.**
+   Обновление страницы и переоткрытие вкладки возобновляют её идеально, другой
+   браузер или устройство — нет, потому что нет аккаунта, который связал бы
+   сессии. Сессия старше `session.ttlHours` (72) считается **исчезнувшей, а не
+   возобновляемой**: все роуты отвечают `410`, а клиент забывает сохранённый id и
+   начинает новую сессию с коротким пояснением, вместо того чтобы рисовать
+   воронку, которую нельзя отправить. Ответы из истёкшей сессии не переносятся —
+   они валидировались по конфигу, на котором новая сессия может даже не работать.
+5. **Роуты админки и дашборда по умолчанию без аутентификации**, чтобы
+   развёрнутый URL можно было посмотреть без учётных данных. `ADMIN_TOKEN`
+   закрывает изменяющие роуты, если задан. Для продакшена так делать нельзя.
+6. **Аналитика считает сессии по событиям `session_started`**, а не по строкам в
+   таблице сессий: источником истины является конвейер событий.
+7. **Сессии с принудительным вариантом по умолчанию исключены** из выкладки по
+   эксперименту.
+8. **Нумерацией версий владеет платформа.** Собственное поле `version` из файла
+   записывается как `source_version`, но сессии закрепляются за нумерацией
+   платформы, поэтому публикация одного и того же файла дважды даёт две разные
+   версии, а не конфликт.
+9. **Два символа в присланном `funnel-v1.json` пришли битыми** —
+   `"About 3â6 hours apart"` и `"Building your recommendationâ¦"`, артефакт
+   перекодировки UTF-8. Я восстановил их до `3–6` и `…`. Стоит убедиться, что
+   исходный файл на стороне заказчика чистый.
 
-**Genuine limitations:**
+**Настоящие ограничения:**
 
-- **SQLite on one node.** Correct and fast here, but ingest is synchronous and
-  single-writer; real volume would need a queue in front and a server-side
-  database behind.
-- **Analytics is computed per request.** Fine at this scale; production would
-  pre-aggregate into a rollup table.
-- **No significance testing.** The dashboard reports a directional lift and
-  labels it as such.
-- **The progress denominator can grow mid-funnel.** Answering `work_mode:
-  hybrid` reveals `office_days`, taking the count from 6 to 7. That is the honest
-  reading of `countVisibleOnly`, but it means the bar can step backwards. The
-  alternative — assuming conditional steps *will* appear until ruled out — makes
-  the bar jump the other way for the two-thirds of users who do see it. I chose
-  the config-faithful reading; happy to flip it.
-- **`client_seq` measures disorder but does not correct it.** By design —
-  aggregation is order-independent, so there is nothing to correct.
-- **No visual config editor**, per the brief.
-- **The generator's outcomes are random, not modelled on the hypothesis.** It
-  proves the pipeline, not the experiment.
-- **`node:sqlite` requires Node 22.5+.** It is loaded through `createRequire`
-  because Vite and Vitest resolve against builtin lists that predate it.
+- **SQLite на одном узле.** Здесь это правильно и быстро, но приём событий
+  синхронный и с одним писателем; реальные объёмы потребуют очереди перед ним и
+  серверной СУБД за ним.
+- **Аналитика считается на каждый запрос.** На этом масштабе нормально; в
+  продакшене нужна предагрегация в rollup-таблицу.
+- **Нет проверки значимости.** Дашборд показывает направление изменения и прямо
+  подписывает это.
+- **Знаменатель прогресса может вырасти посреди воронки.** Ответ `work_mode:
+  hybrid` открывает `office_days`, и счётчик идёт с 6 на 7. Это честное прочтение
+  `countVisibleOnly`, но означает, что полоса может шагнуть назад.
+  Альтернатива — считать, что условные шаги *появятся*, пока не доказано
+  обратное, — дёргает полосу в другую сторону для тех двух третей, кто их всё-таки
+  увидит. Я выбрал прочтение, верное конфигу; готов поменять.
+- **`client_seq` измеряет беспорядок, но не исправляет его.** Так и задумано:
+  агрегация не зависит от порядка, исправлять нечего.
+- **Визуального редактора конфигов нет**, согласно ТЗ.
+- **Исходы генератора случайны и не смоделированы под гипотезу.** Он доказывает
+  работу конвейера, а не эксперимент.
+- **`node:sqlite` требует Node 22.5+.** Он загружается через `createRequire`,
+  потому что Vite и Vitest резолвят по спискам встроенных модулей, появившимся
+  раньше него.
+- **Тексты воронки не локализованы.** Интерфейс приложения на русском, но
+  присланный конфиг имеет `locale: en-AU`, и его вопросы и результаты остаются
+  английскими, пока не будет опубликован переведённый конфиг.
 
 ---
 
-## Build timeline
+## Хронология итераций
 
-**Iteration 1 (first pass, before the config arrived).** Built against a config
-schema I designed myself, since the two referenced configs were not attached:
-engine first, then schema, version store, sessions, ingest, analytics, traffic
-generator, tests, client.
+### Итерация 1
 
-**Adapting to the supplied config.** When `funnel-v1.json` arrived its schema
-differed substantially from my placeholder — steps keyed by id rather than an
-array, `stepSequence` per variant instead of per-step `next` pointers,
-`visibleWhen` instead of graph edges, four results selected by `resultRules`
-instead of one, and config-supplied validation copy.
+**Первый проход, до получения конфига.** Оба упомянутых в ТЗ конфига не были
+приложены, поэтому работа шла против схемы, спроектированной мной: сначала
+движок, затем схема, хранилище версий, сессии, приём событий, аналитика,
+генератор трафика, тесты, клиент.
 
-I rewrote the engine to speak that schema **natively** rather than adapting it
-into my own shape. An adapter would have been faster and would have been the
-wrong call: the config is the client's contract, and a translation layer is one
-more thing to drift, plus it would have made the stored config not-quite the
-published config — which is exactly what the version-pinning guarantee rests on.
+**Адаптация к присланному конфигу.** Когда `funnel-v1.json` пришёл, его схема
+существенно отличалась от моей заглушки: шаги ключуются по id, а не массивом;
+`stepSequence` задаётся на вариант, а не указателями `next` у шагов;
+`visibleWhen` вместо рёбер графа; четыре результата, выбираемых `resultRules`,
+вместо одного; тексты валидации приходят из конфига.
 
-The architecture survived intact. Version pinning, event idempotency, session
-ownership of navigation and the aggregation rules are all schema-independent, so
-the change was confined to `shared/funnel.ts`, the config-shaped edges of the
-server, the renderers and the fixtures. The new model is *simpler*: branching by
-visibility cannot dangle, so ~80 lines of transition-repair logic were deleted
-outright.
+Я переписал движок так, чтобы он говорил на этой схеме **нативно**, а не
+переводил её в свою. Адаптер был бы быстрее и был бы ошибкой: конфиг — это
+контракт с заказчиком, слой перевода это ещё одна сущность, способная разъехаться,
+и вдобавок он сделал бы сохранённый конфиг не вполне тем, который опубликован, —
+а именно на этом держится гарантия закрепления версии.
 
-**Iteration 2.** Pending the real config; the flow is proven with a stand-in.
+Архитектура при этом уцелела. Закрепление версий, идемпотентность событий,
+владение навигацией на сервере и правила агрегации не зависят от схемы, поэтому
+изменения свелись к `shared/funnel.ts`, конфигозависимым краям сервера,
+рендерерам и фикстурам. Новая модель оказалась *проще*: ветвление по видимости не
+может дать висящий переход, и около 80 строк логики починки переходов были
+удалены совсем.
 
-## Working with AI agents
+**Финальная зачистка.** Удалён мёртвый код, устранено дублирование типов между
+клиентом и сервером (клиент выводит формы ответов из серверных модулей через
+`import type`, который стирается при сборке), комментарии сокращены до коротких
+русских строк и оставлены только там, где логика неочевидна.
 
-Built with Claude Code, driven as a single directed session rather than a fan-out
-of parallel agents — every layer here depends on the one beneath it, so
-coordination overhead would have exceeded the benefit.
+### Итерация 2
 
-- **Verification after each layer, not at the end.** The engine was smoke-tested
-  against the real config before any server code touched it; ingest was proven
-  with the generator before the dashboard was written.
-- **Tests assert hand-derived values.** A test that asserts whatever the
-  implementation returned would have locked in the parameter-order bug below.
-- **Four bugs, and telling them apart is the skill.** Two were mine — a
-  parameter-order mismatch in the analytics WHERE builder that silently zeroed
-  every filtered segment, and a validation-message lookup that preferred the
-  `required` key when this config supplies only `minSelections`, falling through
-  to generic engine text. Two were bugs in my *tests* — a helper returning the
-  wrong type, and assertions that assumed a variant when assignment is random.
-- **One self-inflicted wound worth recording:** a SQL comment containing a
-  backtick terminated the template literal holding the schema. Caught instantly
-  by typecheck, which is the argument for running it after every edit rather than
-  at the end.
+**Статус: ждём настоящий конфиг.** Процесс целиком проверен на заглушке
+`configs/funnel-v2.example.json`, которая воспроизводит все три заявленных
+изменения — новую ветку по условию, шаг, убранный у одного варианта, и новое
+событие.
+
+Что уже готово к её приходу:
+
+- публикация и откат без редеплоя и без миграций схемы;
+- закрепление версии за сессией, проверенное тестами;
+- приём событий, привязанный к версии, — новое событие не требует правок сервера;
+- аналитика, сравнивающая версии между собой и сохраняющаяся после отката.
+
+Ожидаемая работа при подстановке настоящего файла — нулевая, если он не
+использует того, чего в движке нет. Наиболее вероятные кандидаты на доработку:
+новый `type` шага, новый `operator` условия или `resultSource`, отличный от
+`resultRules`.
+
+---
+
+## Работа с ИИ-агентами
+
+Собрано с Claude Code, но как одна направляемая сессия, а не веер параллельных
+агентов: каждый слой здесь опирается на предыдущий, поэтому накладные расходы на
+координацию превысили бы выигрыш.
+
+- **Проверка после каждого слоя, а не в конце.** Движок прогонялся против
+  настоящего конфига до того, как его коснулся серверный код; приём событий был
+  доказан генератором до того, как появился дашборд.
+- **Тесты проверяют значения, выведенные вручную.** Тест, фиксирующий то, что
+  вернула реализация, закрепил бы описанный ниже баг с порядком параметров.
+- **Четыре бага, и умение отличать их друг от друга и есть навык.** Два были в
+  коде: несовпадение порядка параметров в сборщике WHERE для аналитики, молча
+  обнулявшее каждый отфильтрованный сегмент, и поиск текста валидации, который
+  предпочитал ключ `required`, хотя этот конфиг задаёт только `minSelections`, —
+  из-за чего подставлялся общий текст движка. Ещё два были багами *в тестах*:
+  хелпер возвращал не тот тип, а часть проверок предполагала конкретный вариант
+  там, где назначение случайно.
+- **Одна самонанесённая рана, достойная записи:** обратная кавычка внутри
+  SQL-комментария закрыла шаблонную строку со схемой БД. Поймано мгновенно
+  тайпчеком — это и есть аргумент за то, чтобы гонять его после каждой правки, а
+  не в конце.
