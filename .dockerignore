@@ -37,7 +37,7 @@ data
 .DS_Store
 
 # Not part of the running service. Platform configs are read from the repo by
-# Render / Fly / Railway, never from inside the image.
+# Render and Railway, never from inside the image.
 Dockerfile
 .dockerignore
 deploy

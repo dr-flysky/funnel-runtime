@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError, type VersionSummary } from './api';
+import { t } from './strings';
 
 interface Activation {
   id: number;
@@ -52,9 +53,9 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
     <div className="admin">
       <header className="admin-head">
         <div>
-          <h1>Version control</h1>
+          <h1>{t.admin.title}</h1>
           <p className="muted">
-            Funnel <code>{funnelKey}</code> — active version{' '}
+            {t.admin.funnelLabel} <code>{funnelKey}</code> — {t.admin.activeVersion}{' '}
             <strong>v{active?.version ?? '—'}</strong>
           </p>
         </div>
@@ -85,27 +86,27 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
       )}
 
       <section className="panel">
-        <h2>Publish from the repo</h2>
+        <h2>{t.admin.publishHeading}</h2>
         <p className="muted small">
-          Publishing appends a new immutable version and points new traffic at it. Sessions already
-          in flight keep running on the version they started with — no redeploy, no migration.
+          {t.admin.publishNote}
         </p>
         <div className="file-list">
-          {files.length === 0 && <p className="muted">No config files for this funnel.</p>}
+          {files.length === 0 && <p className="muted">{t.admin.noConfigFiles}</p>}
           {files.map((f) => (
             <div key={f.file} className="file-row">
               <div>
                 <code>{f.file}</code>
                 <span className="muted small">
-                  {' '}· {f.steps} steps{f.sourceVersion !== null ? ` · declares v${f.sourceVersion}` : ''}
+                  {' '}· {f.steps} {t.admin.steps}
+                  {f.sourceVersion !== null ? ` · ${t.admin.declaresVersion(f.sourceVersion)}` : ''}
                 </span>
               </div>
               <button
                 className="btn small"
                 disabled={busy}
-                onClick={() => run(() => api.publishFile(f.file), `Published ${f.file}`)}
+                onClick={() => run(() => api.publishFile(f.file), t.admin.published(f.file))}
               >
-                Publish
+                {t.admin.publish}
               </button>
             </div>
           ))}
@@ -114,25 +115,25 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
 
       <section className="panel">
         <div className="panel-head">
-          <h2>Versions</h2>
+          <h2>{t.admin.versionsHeading}</h2>
           <button
             className="btn small danger"
             disabled={busy || versions.length < 2}
-            onClick={() => run(() => api.rollback(funnelKey), 'Rolled back to the previous version')}
+            onClick={() => run(() => api.rollback(funnelKey), t.admin.rolledBack)}
           >
-            Roll back
+            {t.admin.rollback}
           </button>
         </div>
         <table className="table">
           <thead>
             <tr>
-              <th>Version</th>
-              <th>Steps</th>
-              <th>Results</th>
-              <th>Variants</th>
-              <th>Experiment</th>
-              <th>Published</th>
-              <th>Note</th>
+              <th>{t.admin.columns.version}</th>
+              <th>{t.admin.columns.steps}</th>
+              <th>{t.admin.columns.results}</th>
+              <th>{t.admin.columns.variants}</th>
+              <th>{t.admin.columns.experiment}</th>
+              <th>{t.admin.columns.publishedAt}</th>
+              <th>{t.admin.columns.note}</th>
               <th />
             </tr>
           </thead>
@@ -141,7 +142,7 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
               <tr key={v.id} className={v.isActive ? 'active-row' : ''}>
                 <td>
                   <strong>v{v.version}</strong>
-                  {v.isActive && <span className="pill ok">active</span>}
+                  {v.isActive && <span className="pill ok">{t.admin.active}</span>}
                 </td>
                 <td>{v.stepCount}</td>
                 <td>{v.resultCount}</td>
@@ -154,9 +155,9 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
                     <button
                       className="btn small ghost"
                       disabled={busy}
-                      onClick={() => run(() => api.activate(funnelKey, v.id), `Activated v${v.version}`)}
+                      onClick={() => run(() => api.activate(funnelKey, v.id), t.admin.activated(v.version))}
                     >
-                      Activate
+                      {t.admin.activate}
                     </button>
                   )}
                 </td>
@@ -167,7 +168,7 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
       </section>
 
       <section className="panel">
-        <h2>Activation history</h2>
+        <h2>{t.admin.historyHeading}</h2>
         <ul className="timeline">
           {activations.map((a) => (
             <li key={a.id}>

@@ -1,23 +1,21 @@
 # Railway service config.
 #
 # Lives at the repo root because that is where Railway looks for it — unlike
-# deploy/render.yaml and deploy/fly.toml, which are passed to their CLIs
-# explicitly.
+# deploy/render.yaml, which is passed to Render explicitly.
 #
 # TOML rather than railway.json purely so this file can explain itself.
 
 [build]
 # Build the committed Dockerfile rather than letting Nixpacks infer a runtime.
-# The image is what the other two platforms deploy as well, so all three run
-# the same artifact.
+# It is the same image deploy/render.yaml builds, so both targets and a local
+# `docker run` all execute the same artifact.
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
 # Exactly one instance, always. The store is a SQLite file on a mounted volume:
 # a second replica would attach its own copy and split version pinning, session
-# state and analytics across two databases that never reconcile. This is the
-# same constraint as `--ha=false` on Fly.
+# state and analytics across two databases that never reconcile.
 numReplicas = 1
 
 # Restart on crash, but stop retrying rather than loop forever on a config the

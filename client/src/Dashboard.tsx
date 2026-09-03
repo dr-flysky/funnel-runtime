@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from './api';
+import { t } from './strings';
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
@@ -82,7 +83,7 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
   }, []);
 
   if (error) return <div className="admin"><div className="banner err">{error}</div></div>;
-  if (!report) return <div className="admin"><p className="muted">Loading…</p></div>;
+  if (!report) return <div className="admin"><p className="muted">{t.common.loading}</p></div>;
 
   const { overall } = report;
   const [a, b] = report.byVariant;
@@ -93,9 +94,10 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
     <div className="admin">
       <header className="admin-head">
         <div>
-          <h1>Funnel analytics</h1>
+          <h1>{t.dashboard.title}</h1>
           <p className="muted">
-            Every number counts <strong>unique sessions</strong>, not events.
+            {t.dashboard.subtitlePrefix} <strong>{t.dashboard.subtitle}</strong>
+            {t.dashboard.subtitleSuffix}
           </p>
         </div>
         <nav className="tabs">
@@ -113,18 +115,18 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
 
       <section className="filters">
         <label>
-          Campaign
+          {t.dashboard.filters.campaign}
           <select value={campaign} onChange={(e) => setCampaign(e.target.value)}>
-            <option value="">All campaigns</option>
+            <option value="">{t.dashboard.filters.allCampaigns}</option>
             {report.campaigns.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
         </label>
         <label>
-          Version
+          {t.dashboard.filters.version}
           <select value={version} onChange={(e) => setVersion(e.target.value)}>
-            <option value="">All versions</option>
+            <option value="">{t.dashboard.filters.allVersions}</option>
             {report.versions.map((v) => (
               <option key={v} value={String(v)}>v{v}</option>
             ))}
@@ -136,27 +138,28 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
             checked={includeSynthetic}
             onChange={(e) => setIncludeSynthetic(e.target.checked)}
           />
-          Include generated traffic
+          {t.dashboard.filters.includeSynthetic}
         </label>
       </section>
 
       <section className="kpis">
-        <Kpi label="Started" value={String(overall.startedSessions)} hint="unique sessions" />
-        <Kpi label="Reached result" value={String(overall.resultSessions)} hint={pct(overall.resultRate)} />
-        <Kpi label="CTA clicks" value={String(overall.ctaSessions)} hint={pct(overall.ctaCtrOnResult) + ' of results'} />
-        <Kpi label="CTA click rate" value={pct(overall.ctaClickRate)} hint="primary metric" accent />
+        <Kpi label={t.dashboard.kpi.started} value={String(overall.startedSessions)} hint={t.dashboard.kpi.uniqueSessions} />
+        <Kpi label={t.dashboard.kpi.reachedResult} value={String(overall.resultSessions)} hint={pct(overall.resultRate)} />
+        <Kpi label={t.dashboard.kpi.ctaClicks} value={String(overall.ctaSessions)} hint={`${pct(overall.ctaCtrOnResult)} ${t.dashboard.kpi.ofResults}`} />
+        <Kpi label={t.dashboard.kpi.ctaClickRate} value={pct(overall.ctaClickRate)} hint={t.dashboard.kpi.primaryMetric} accent />
       </section>
 
       {report.experiment && (
         <section className="panel">
-          <h2>Experiment · {report.experiment.id}</h2>
+          <h2>
+            {t.dashboard.experiment.heading} · {report.experiment.id}
+          </h2>
           <p className="muted small">
-            Variant B reorders the questions and reframes the result copy. Assignment is
-            server-side and sticky for the life of a session.
+            {t.dashboard.experiment.description}
           </p>
           <p className="muted small">
-            <strong>Primary metric:</strong> cta_click_rate — unique sessions with{' '}
-            <code>cta_clicked</code> divided by unique sessions with <code>session_started</code>.
+            <strong>{t.dashboard.experiment.primaryMetricLabel}</strong>{' '}
+            {t.dashboard.experiment.primaryMetricBody('cta_clicked', 'session_started')}
           </p>
 
           <div className="compare">
@@ -165,43 +168,44 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
                 <h3>{v.label}</h3>
                 <div className="big">{pct(v.ctaClickRate)}</div>
                 <p className="muted small">
-                  {v.ctaSessions} CTA clicks from {v.startedSessions} sessions
+                  {t.dashboard.experiment.ctaFrom(v.ctaSessions, v.startedSessions)}
                 </p>
-                <p className="muted small">Reached result: {pct(v.resultRate)}</p>
+                <p className="muted small">
+                  {t.dashboard.experiment.reachedResult} {pct(v.resultRate)}
+                </p>
               </div>
             ))}
           </div>
           {lift !== null && (
             <p className={`lift ${lift >= 0 ? 'up' : 'down'}`}>
-              Variant B is {lift >= 0 ? 'up' : 'down'} {pct(Math.abs(lift))} against A on the primary
-              metric.{' '}
-              <span className="muted small">
-                Directional only — this sample is not powered for significance.
-              </span>
+              {t.dashboard.experiment.lift(
+                lift >= 0 ? t.dashboard.experiment.liftUp : t.dashboard.experiment.liftDown,
+                pct(Math.abs(lift)),
+              )}{' '}
+              <span className="muted small">{t.dashboard.experiment.liftCaveat}</span>
             </p>
           )}
         </section>
       )}
 
       <section className="panel">
-        <h2>Step-by-step</h2>
+        <h2>{t.dashboard.steps.heading}</h2>
         <p className="muted small">
-          Conversion is <code>step_completed / step_viewed</code> per step, so it stays correct when
-          users take different branches. Drop-off is the difference.
+          {t.dashboard.steps.note}
         </p>
         <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
-                <th>Step</th>
-                <th className="num">Reached</th>
-                <th className="num">Completed</th>
-                <th className="num">Drop-off</th>
-                <th className="num">Conversion</th>
-                <th className="num">Of all starts</th>
-                <th className="num">Backs</th>
-                <th className="num">Views / session</th>
-                <th>Funnel</th>
+                <th>{t.dashboard.steps.columns.step}</th>
+                <th className="num">{t.dashboard.steps.columns.reached}</th>
+                <th className="num">{t.dashboard.steps.columns.completed}</th>
+                <th className="num">{t.dashboard.steps.columns.dropOff}</th>
+                <th className="num">{t.dashboard.steps.columns.conversion}</th>
+                <th className="num">{t.dashboard.steps.columns.ofAllStarts}</th>
+                <th className="num">{t.dashboard.steps.columns.backs}</th>
+                <th className="num">{t.dashboard.steps.columns.viewsPerSession}</th>
+                <th>{t.dashboard.steps.columns.funnel}</th>
               </tr>
             </thead>
             <tbody>
@@ -232,21 +236,20 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
 
       {report.results.length > 0 && (
         <section className="panel">
-          <h2>Recommendations reached</h2>
+          <h2>{t.dashboard.results.heading}</h2>
           <p className="muted small">
-            Which result each session landed on, chosen by <code>resultRules</code> in config
-            order with <code>defaultResultId</code> as the fallback.
+            {t.dashboard.results.note}
           </p>
           <div className="table-scroll">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Result</th>
-                  <th className="num">Sessions</th>
-                  <th className="num">Share</th>
-                  <th className="num">CTA clicks</th>
-                  <th className="num">CTA rate</th>
-                  <th>Share</th>
+                  <th>{t.dashboard.results.columns.result}</th>
+                  <th className="num">{t.dashboard.results.columns.sessions}</th>
+                  <th className="num">{t.dashboard.results.columns.share}</th>
+                  <th className="num">{t.dashboard.results.columns.ctaClicks}</th>
+                  <th className="num">{t.dashboard.results.columns.ctaRate}</th>
+                  <th>{t.dashboard.results.columns.share}</th>
                 </tr>
               </thead>
               <tbody>
@@ -274,16 +277,16 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
       )}
 
       <section className="panel">
-        <h2>Version comparison</h2>
+        <h2>{t.dashboard.versions.heading}</h2>
         <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
-                <th>Version</th>
-                <th className="num">Sessions</th>
-                <th className="num">Reached result</th>
-                <th className="num">Result rate</th>
-                <th className="num">CTA click rate</th>
+                <th>{t.dashboard.versions.columns.version}</th>
+                <th className="num">{t.dashboard.versions.columns.sessions}</th>
+                <th className="num">{t.dashboard.versions.columns.reachedResult}</th>
+                <th className="num">{t.dashboard.versions.columns.resultRate}</th>
+                <th className="num">{t.dashboard.versions.columns.ctaClickRate}</th>
               </tr>
             </thead>
             <tbody>
@@ -303,13 +306,17 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
 
       {report.customEvents.length > 0 && (
         <section className="panel">
-          <h2>Events beyond the core set</h2>
+          <h2>{t.dashboard.customEvents.heading}</h2>
           <p className="muted small">
-            Introduced by a config version, stored and reported with no schema change.
+            {t.dashboard.customEvents.note}
           </p>
           <table className="table">
             <thead>
-              <tr><th>Event</th><th className="num">Events</th><th className="num">Sessions</th></tr>
+              <tr>
+                <th>{t.dashboard.customEvents.columns.event}</th>
+                <th className="num">{t.dashboard.customEvents.columns.events}</th>
+                <th className="num">{t.dashboard.customEvents.columns.sessions}</th>
+              </tr>
             </thead>
             <tbody>
               {report.customEvents.map((c) => (
@@ -325,32 +332,30 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
       )}
 
       <section className="panel">
-        <h2>Data quality</h2>
+        <h2>{t.dashboard.quality.heading}</h2>
         <p className="muted small">
-          Evidence that the messy cases actually occurred and were handled, rather than never
-          arriving.
+          {t.dashboard.quality.note}
         </p>
 
-        <h3 className="quality-head">Current selection</h3>
+        <h3 className="quality-head">{t.dashboard.quality.scopedHeading}</h3>
         <div className="quality">
           {Object.entries(report.dataQuality.scoped).map(([k, v]) => (
             <div key={k} className="quality-item">
               <span className="quality-value">{v}</span>
-              <span className="quality-label">{k.replace(/([A-Z])/g, ' $1').toLowerCase()}</span>
+              <span className="quality-label">{t.dashboard.quality.labels[k] ?? k}</span>
             </div>
           ))}
         </div>
 
-        <h3 className="quality-head">All ingest, every funnel</h3>
+        <h3 className="quality-head">{t.dashboard.quality.allTimeHeading}</h3>
         <p className="muted small">
-          These two cannot narrow with the filters above: a suppressed duplicate and a rejected
-          event never became rows, so there is nothing left to attribute to a campaign or version.
+          {t.dashboard.quality.allTimeNote}
         </p>
         <div className="quality">
           {Object.entries(report.dataQuality.allTime).map(([k, v]) => (
             <div key={k} className="quality-item">
               <span className="quality-value">{v}</span>
-              <span className="quality-label">{k.replace(/([A-Z])/g, ' $1').toLowerCase()}</span>
+              <span className="quality-label">{t.dashboard.quality.labels[k] ?? k}</span>
             </div>
           ))}
         </div>

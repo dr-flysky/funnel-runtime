@@ -3,6 +3,7 @@ import Funnel from './Funnel';
 import Admin from './Admin';
 import Dashboard from './Dashboard';
 import { api } from './api';
+import { t } from './strings';
 
 /**
  * Three surfaces, one bundle. A dependency-free router keeps the client small;
@@ -35,7 +36,7 @@ export default function App() {
         if (cancelled) return;
         const live = funnels.find((f) => f.activeVersion !== null) ?? funnels[0];
         if (live) setFunnelKey(live.key);
-        else setError('No funnel has been published yet.');
+        else setError(t.boot.noFunnelPublished);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -47,9 +48,9 @@ export default function App() {
 
   const nav = (
     <nav className="topnav">
-      <a className={path === '/' ? 'on' : ''} href="/">Funnel</a>
-      <a className={path.startsWith('/admin') ? 'on' : ''} href="/admin">Versions</a>
-      <a className={path.startsWith('/dashboard') ? 'on' : ''} href="/dashboard">Analytics</a>
+      <a className={path === '/' ? 'on' : ''} href="/">{t.nav.funnel}</a>
+      <a className={path.startsWith('/admin') ? 'on' : ''} href="/admin">{t.nav.versions}</a>
+      <a className={path.startsWith('/dashboard') ? 'on' : ''} href="/dashboard">{t.nav.analytics}</a>
     </nav>
   );
 
@@ -58,10 +59,10 @@ export default function App() {
     screen = (
       <div className="shell">
         <div className="card error-card">
-          <h2>Nothing to show yet</h2>
+          <h2>{t.boot.nothingTitle}</h2>
           <p className="muted">{error}</p>
           <p className="muted small">
-            Publish a config with <code>npm run seed</code>, then reload.
+            {t.boot.publishHint} <code>npm run seed</code>{t.boot.thenReload}
           </p>
         </div>
       </div>

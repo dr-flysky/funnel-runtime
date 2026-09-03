@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, type SessionView } from './api';
 import { tracker } from './tracker';
+import { t } from './strings';
 import type { AnswerValue, StepDef } from '@shared/funnel';
 
 const SESSION_KEY = (funnelKey: string) => `funnel_runtime.session.${funnelKey}`;
@@ -64,7 +65,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
             // Expired, or a session from a wiped database: start fresh.
             if (!isGone(err)) throw err;
             if (!cancelled && err instanceof ApiError && err.status === 410) {
-              setNotice('Your last visit expired, so this is a fresh start.');
+              setNotice(t.expiry.onBoot);
             }
           }
         }
@@ -138,7 +139,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       // stranding the user on a funnel that can no longer be submitted, start
       // them over and say why.
       if (isGone(err)) {
-        setNotice('That session expired while this tab was open, so we started a new one.');
+        setNotice(t.expiry.midSession);
         setView(await startFresh());
       } else if (err instanceof ApiError && err.status === 400) {
         setFieldError(err.message);
@@ -162,7 +163,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       setView(back);
     } catch (err) {
       if (isGone(err)) {
-        setNotice('That session expired while this tab was open, so we started a new one.');
+        setNotice(t.expiry.midSession);
         setView(await startFresh());
       } else if (!(err instanceof ApiError && err.status === 400)) {
         // A 400 here just means "already at the first step" — not worth a message.
@@ -183,10 +184,10 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     return (
       <div className="shell">
         <div className="card error-card">
-          <h2>Something went wrong</h2>
+          <h2>{t.funnel.errorTitle}</h2>
           <p className="muted">{error}</p>
           <p className="muted small">
-            If no funnel is published yet, run <code>npm run seed</code>.
+            {t.funnel.errorHint} <code>npm run seed</code>.
           </p>
         </div>
       </div>
@@ -210,8 +211,8 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     <div className="shell">
       <div className="meta-bar">
         <span className="pill">v{view.version}</span>
-        <span className={`pill variant-${view.variant}`}>Variant {view.variant}</span>
-        {view.variantSource === 'override' && <span className="pill warn">forced</span>}
+        <span className={`pill variant-${view.variant}`}>{t.funnel.variantPill(view.variant)}</span>
+        {view.variantSource === 'override' && <span className="pill warn">{t.funnel.forced}</span>}
         {view.utm.utm_campaign && <span className="pill ghost">{view.utm.utm_campaign}</span>}
       </div>
 
@@ -219,7 +220,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
         <div className="session-notice" role="status">
           {notice}
           <button type="button" className="notice-dismiss" onClick={() => setNotice(null)}>
-            Dismiss
+            {t.common.dismiss}
           </button>
         </div>
       )}
@@ -227,13 +228,13 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       {!done && view.progress.total > 0 && (
         <div
           className="progress"
-          aria-label={`Question ${view.progress.position} of ${view.progress.total}`}
+          aria-label={t.funnel.progress(view.progress.position, view.progress.total)}
         >
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${view.progress.percent}%` }} />
           </div>
           <span className="progress-label">
-            Question {view.progress.position} of {view.progress.total}
+            {t.funnel.progress(view.progress.position, view.progress.total)}
           </span>
         </div>
       )}
@@ -257,11 +258,11 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
               <div className="actions">
                 {view.canGoBack && (
                   <button type="button" className="btn ghost" onClick={goBack} disabled={busy}>
-                    Back
+                    {t.common.back}
                   </button>
                 )}
                 <button type="button" className="btn primary" onClick={submit} disabled={busy}>
-                  {step.content.primaryActionLabel ?? 'Continue'}
+                  {step.content.primaryActionLabel ?? t.funnel.continueFallback}
                 </button>
               </div>
             </>
@@ -270,8 +271,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       </div>
 
       <p className="footnote">
-        Answers are saved on the server — refresh or close this tab and you will pick up where you
-        left off.
+        {t.funnel.footnote}
       </p>
     </div>
   );
@@ -312,10 +312,10 @@ function ResultScreen({
     const step = view.funnel.steps.find((s) => s.type === 'result');
     return (
       <>
-        <h1>{step?.content.errorTitle ?? 'We could not build the recommendation'}</h1>
+        <h1>{step?.content.errorTitle ?? t.result.failedTitle}</h1>
         <div className="actions">
           <button type="button" className="btn primary" onClick={onRestart}>
-            {step?.content.retryLabel ?? 'Try again'}
+            {step?.content.retryLabel ?? t.result.retry}
           </button>
         </div>
       </>
@@ -341,13 +341,13 @@ function ResultScreen({
 
   return (
     <>
-      <div className="result-badge">Your recommendation</div>
+      <div className="result-badge">{t.result.badge}</div>
       <h1>{result.title}</h1>
       {result.summary && <p className="subtitle">{result.summary}</p>}
 
       {expanded && recommendations.length > 0 && (
         <div className="action-list">
-          <h2>What to do next</h2>
+          <h2>{t.result.whatNext}</h2>
           <ol>
             {recommendations.map((r) => (
               <li key={r}>{r}</li>
@@ -359,11 +359,11 @@ function ResultScreen({
       <div className="actions">
         {view.canGoBack && (
           <button type="button" className="btn ghost" onClick={onBack}>
-            Back
+            {t.common.back}
           </button>
         )}
         <button type="button" className="btn ghost" onClick={onRestart}>
-          Start again
+          {t.result.restart}
         </button>
         {!expanded && (
           <button type="button" className="btn primary" onClick={onCta}>
@@ -406,7 +406,7 @@ function StepHelp({ step, view }: { step: StepDef; view: SessionView }) {
   return (
     <div className="help">
       <button type="button" className="link" onClick={toggle} aria-expanded={open}>
-        {open ? 'Hide help' : 'What does this mean?'}
+        {open ? t.funnel.helpHide : t.funnel.helpShow}
       </button>
       {open && <p className="help-body">{body}</p>}
     </div>
@@ -483,7 +483,7 @@ function StepInput({
       })}
       {isMulti && max !== undefined && (
         <p className="muted small">
-          Choose up to {max}. Selected {selected.length}.
+          {t.funnel.multiSelectHint(max, selected.length)}
         </p>
       )}
     </div>

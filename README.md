@@ -390,10 +390,10 @@ order, all four recommendations reached.
 ## Deployment
 
 One `Dockerfile`, deployed to Railway. `railway.toml` sits at the repo root;
-`deploy/render.yaml` and `deploy/fly.toml` are kept as working alternatives for
-the same image. All three mount a volume at `/data` so the SQLite file survives
-deploys, and `scripts/seed-if-empty.ts` publishes on first boot only — a
-redeploy never resets a live funnel.
+`deploy/render.yaml` is kept as a working alternative for the same image. Both
+mount a volume at `/data` so the SQLite file survives deploys, and
+`scripts/seed-if-empty.ts` publishes on first boot only — a redeploy never
+resets a live funnel.
 
 ```bash
 docker build -t funnel-runtime .
@@ -420,8 +420,8 @@ Dockerfile builder and `numReplicas = 1`. Connect the GitHub repo, then:
 
 `numReplicas = 1` is not a cost setting. The store is a SQLite file on one
 volume; a second replica would open its own copy and split version pinning,
-sessions and analytics across two databases that never reconcile. Same reason
-Fly needs `--ha=false`.
+sessions and analytics across two databases that never reconcile — so any host
+used for this must be pinned to a single always-on instance.
 
 **Render** — `deploy/render.yaml` provisions the web service and a 1GB disk at
 `/data`. Sign in with GitHub; the Docker runtime builds straight from the
@@ -442,21 +442,6 @@ accumulates from then on. Seeding is synchronous, so a cold start costs roughly
 20–60s before the port opens; that is well inside Render's deploy timeout, but
 it is why the value is `0` by default.
 
-**Fly** — the blueprint names `funnel-runtime-drsoft`; Fly app names are
-globally unique, so claim it (or change it) before deploying. The volume must
-exist before the first deploy,
-and `--ha=false` is required: Fly provisions two machines by default and a
-volume attaches to only one, which is also the `numReplicas = 1` argument above.
-
-```bash
-fly apps create funnel-runtime-drsoft       # must match `app` in deploy/fly.toml
-fly volumes create funnel_data --size 1 --region ams
-fly deploy -c deploy/fly.toml --dockerfile Dockerfile --ha=false
-```
-
-`--dockerfile Dockerfile` is passed explicitly because the blueprint's
-`dockerfilePath` is written relative to `deploy/`.
-
 After the first boot, check `/api/health` (it lists the published funnels),
 then `/` for the funnel, `/admin` for versions and `/dashboard` for analytics.
 If you did not set `SEED_TRAFFIC`, walk the funnel a few times so the dashboard
@@ -472,7 +457,7 @@ admin routes. Unset, they are open — see the assumptions below.
 **Confirmed with the client:**
 
 1. **"No third-party services" does not ban hosting platforms** — asked and
-   answered *yes*, so Render / Fly / Vercel are in scope for hosting. Nothing
+   answered *yes*, so managed hosting platforms are in scope. Nothing
    else is outsourced: the event pipeline, experiment assignment, storage and
    analytics are all built in this repo and run in this process.
 

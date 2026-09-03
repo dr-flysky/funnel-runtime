@@ -43,11 +43,15 @@ if (listFunnelKeys().length > 0) {
     // module-level CLI contract and an ephemeral server, and spawning keeps the
     // sequencing unambiguous — this script cannot exit before traffic lands,
     // which is what the container's `seed && start` chain depends on.
-    const result = spawnSync(
-      'npx',
-      ['tsx', 'scripts/generate-traffic.ts', String(sessions)],
-      { stdio: 'inherit', shell: true, env: process.env },
-    );
+    // One command string rather than (command, args, { shell: true }): passing
+    // an args array through a shell triggers DEP0190, since the shell
+    // concatenates rather than escapes them. `sessions` is an integer this
+    // module parsed itself, so there is nothing to escape.
+    const result = spawnSync(`npx tsx scripts/generate-traffic.ts ${sessions}`, {
+      stdio: 'inherit',
+      shell: true,
+      env: process.env,
+    });
     if (result.status !== 0) {
       // Never block boot on demo data: an empty dashboard is a far better
       // outcome than a service that will not start.
