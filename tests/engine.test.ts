@@ -1,7 +1,4 @@
-/**
- * The pure engine against the supplied config: variant resolution, visibility
- * branching, result rules, validation, and the progress policy.
- */
+/** Чистый движок на присланном конфиге: варианты, ветвление, правила результата, валидация, прогресс. */
 import { describe, expect, it } from 'vitest';
 import { loadConfig, makeV2 } from './helpers.ts';
 import {
@@ -25,7 +22,7 @@ import {
 
 const v1 = loadConfig('funnel-v1.json');
 
-/** Walk the whole funnel with a fixed answer set, returning the step ids seen. */
+/** Проходит воронку с фиксированными ответами и возвращает увиденные id шагов. */
 function walk(funnel: ResolvedFunnel, answers: Answers): string[] {
   const path: string[] = [];
   let cursor = firstStepId(funnel, answers);
@@ -69,14 +66,10 @@ describe('config validation', () => {
     expect(configErrors(broken).join(' ')).toMatch(/no result step/);
   });
 
-  /**
-   * The important one: `visibleWhen` reads an answer, so the step that supplies
-   * that answer must come earlier in *this variant's* order. Otherwise the
-   * predicate silently evaluates against an absent answer and the step vanishes.
-   */
+  /** Ключевое: шаг с ответом для `visibleWhen` обязан идти раньше в порядке ИМЕННО этого варианта. */
   it('rejects a visibleWhen gated on an answer collected later in the sequence', () => {
     const broken = structuredClone(v1) as FunnelConfig;
-    // Move office_days before work_mode, which gates it.
+    // Ставим office_days перед work_mode, который его открывает.
     broken.experiment.variants.A.stepSequence = [
       'intro', 'office_days', 'work_mode', 'team_size', 'priorities',
       'timezone_span', 'async_maturity', 'tool_count', 'result',
@@ -88,8 +81,7 @@ describe('config validation', () => {
     const odd = structuredClone(v1) as FunnelConfig;
     odd.results.balanced.cta.action = 'open_checkout';
 
-    // A warning, not an error: the client degrades to revealing the
-    // recommendation rather than presenting a dead button.
+    // Предупреждение, а не ошибка: клиент раскроет рекомендацию вместо мёртвой кнопки.
     expect(configErrors(odd)).toEqual([]);
     const warnings = validateConfig(odd).filter((i) => i.level === 'warning');
     expect(warnings.some((w) => /open_checkout/.test(w.message))).toBe(true);
@@ -136,7 +128,7 @@ describe('variant resolution', () => {
     expect(B.steps[0].content.title).toBe('How should your team really work?');
     expect(B.steps[0].content.primaryActionLabel).toBe('Show me');
 
-    // priorities is overridden for B in content only; its validation survives.
+    // У B переопределён только текст priorities — валидация должна уцелеть.
     const bPriorities = stepById(B, 'priorities')!;
     expect(bPriorities.content.title).toBe('What would make the biggest difference right now?');
     expect(bPriorities.validation?.maxSelections).toBe(3);
@@ -150,7 +142,7 @@ describe('variant resolution', () => {
     expect(A.results.async_native.title).toBe('Async-native');
     expect(B.results.async_native.title).toBe('Your team is ready to reduce meetings');
     expect(B.results.async_native.cta.label).toBe('See the 30-day action list');
-    // Untouched fields survive the merge.
+    // Нетронутые поля переживают слияние.
     expect(B.results.async_native.recommendations).toHaveLength(3);
   });
 
@@ -210,10 +202,9 @@ describe('result rules', () => {
   const A = resolveVariant(v1, 'A');
 
   it('matches the first rule that passes, in config order', () => {
-    // Remote + wide timezones satisfies the first branch of async_native.
+    // Remote + широкие часовые пояса удовлетворяют первой ветке async_native.
     expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'wide' })).toBe('async_native');
-    // High async maturity satisfies the second branch on its own, and
-    // async_native is listed first, so it wins over hybrid_structured.
+    // Высокая async-зрелость сама даёт вторую ветку, а async_native стоит первым и выигрывает.
     expect(resolveResultId(A, { work_mode: 'hybrid', async_maturity: 'high' })).toBe('async_native');
   });
 
@@ -229,10 +220,10 @@ describe('result rules', () => {
   });
 
   it('evaluates nested any/all trees correctly', () => {
-    // remote + same hours fails the `all`, and low maturity fails the `any`.
+    // remote + одинаковые часы не проходят `all`, низкая зрелость не проходит `any`.
     expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'same', async_maturity: 'medium' }))
       .toBe('balanced');
-    // remote + global hours satisfies the `all`.
+    // remote + глобальные часы удовлетворяют `all`.
     expect(resolveResultId(A, { work_mode: 'remote', timezone_span: 'global', async_maturity: 'low' }))
       .toBe('async_native');
   });
@@ -241,7 +232,7 @@ describe('result rules', () => {
 describe('progress', () => {
   it('excludes info and result screens from the count', () => {
     const A = resolveVariant(v1, 'A');
-    // Variant A hybrid path: 7 questions (intro and result are excluded).
+    // Гибридный путь варианта A: 7 вопросов (интро и результат исключены).
     const p = computeProgress(A, 'team_size', { work_mode: 'hybrid' });
     expect(p.total).toBe(7);
   });
@@ -251,7 +242,7 @@ describe('progress', () => {
     const hybrid = computeProgress(A, 'team_size', { work_mode: 'hybrid' });
     const remote = computeProgress(A, 'team_size', { work_mode: 'remote' });
 
-    // Remote hides office_days, so the denominator shrinks by one.
+    // Remote скрывает office_days, поэтому знаменатель уменьшается на один.
     expect(hybrid.total).toBe(7);
     expect(remote.total).toBe(6);
   });
@@ -274,7 +265,7 @@ describe('progress', () => {
     const A = resolveVariant(v1, 'A');
     const p = computeProgress(A, 'intro', { work_mode: 'remote' });
     expect(p.visibleIndex).toBe(0);
-    // intro + 6 questions + result
+    // интро + 6 вопросов + результат
     expect(p.visibleCount).toBe(8);
   });
 });
@@ -325,13 +316,12 @@ describe('analytics-safe answer summaries', () => {
   it('emits the answer kind and nothing else', () => {
     const A = resolveVariant(v1, 'A');
 
-    // The config sets events.privacy.storeRawAnswers to false and declares
-    // answer_submitted with exactly one property: answer_kind.
+    // Конфиг ставит storeRawAnswers: false и объявляет у answer_submitted ровно одно свойство — answer_kind.
     expect(summariseAnswer(stepById(A, 'work_mode')!)).toEqual({ answer_kind: 'single_select' });
     expect(summariseAnswer(stepById(A, 'priorities')!)).toEqual({ answer_kind: 'multi_select' });
     expect(summariseAnswer(stepById(A, 'team_size')!)).toEqual({ answer_kind: 'number' });
 
-    // No value, bucket or option id may leak into the payload.
+    // Ни значение, ни корзина, ни id опции не должны утечь в payload.
     const keys = Object.keys(summariseAnswer(stepById(A, 'team_size')!));
     expect(keys).toEqual(['answer_kind']);
   });
@@ -361,30 +351,24 @@ describe('a v2-shaped config', () => {
     expect(A.steps.some((s) => s.id === 'tool_count')).toBe(true);
     expect(B.steps.some((s) => s.id === 'tool_count')).toBe(false);
 
-    // Omission cannot strand the user: the sequence is linear, so the step
-    // after the removed one simply becomes next.
+    // Пропуск не оставит пользователя в тупике: последовательность линейна, следующим станет шаг за удалённым.
     const path = walk(B, { work_mode: 'remote', async_maturity: 'low' });
     expect(path).not.toContain('tool_count');
     expect(path[path.length - 1]).toBe('result');
   });
 
-  /**
-   * The client renders the help affordance only for versions whose config
-   * declares `help_opened`, so the declared list has to survive resolution and
-   * reach the browser. Without this, a new event is acceptable at ingest but
-   * nothing in the UI can produce it.
-   */
+  /** Кнопка подсказки рисуется только на версиях, объявивших `help_opened`, поэтому список обязан дойти до браузера. */
   it('carries the declared event names through to the resolved funnel', () => {
     const v1Resolved = resolveVariant(v1, 'A');
     const v2Resolved = resolveVariant(v2, 'A');
 
-    // Core events are always declared, whatever the config says.
+    // Базовые события объявлены всегда, что бы ни было в конфиге.
     for (const core of CORE_EVENT_TYPES) {
       expect(v1Resolved.allowedEvents).toContain(core);
       expect(v2Resolved.allowedEvents).toContain(core);
     }
 
-    // The new one is version-specific: v2 has it, v1 does not.
+    // Новое событие привязано к версии: у v2 есть, у v1 нет.
     expect(v2Resolved.allowedEvents).toContain('help_opened');
     expect(v1Resolved.allowedEvents).not.toContain('help_opened');
   });

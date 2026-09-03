@@ -1,21 +1,12 @@
 /**
- * Analytics aggregation.
+ * Агрегация аналитики. Три правила действуют для каждого числа ниже:
  *
- * Three rules govern every number produced here:
- *
- *  1. **Count sessions, not events.** Every metric is a COUNT(DISTINCT
- *     session_id). A user who re-views a step ten times, or whose client
- *     retries a batch, moves no metric.
- *
- *  2. **Never read events as a sequence.** Nothing below sorts by timestamp to
- *     decide what happened. An event that arrives late, or out of order, lands
- *     in exactly the same set as one that arrived on time.
- *
- *  3. **Per-step conversion is `step_completed / step_viewed`.** The server
- *     only emits `step_completed` when it actually advanced the user, so this
- *     is a true step-to-step conversion that stays correct under branching —
- *     unlike comparing a step against its neighbour in array order, which is
- *     meaningless when users take different paths.
+ *  1. Считаем сессии, а не события: везде COUNT(DISTINCT session_id), поэтому
+ *     повторный просмотр и ретрай батча не двигают ни одну метрику.
+ *  2. Никогда не читаем события как последовательность — опоздавшее событие
+ *     попадает ровно в то же множество, что и пришедшее вовремя.
+ *  3. Конверсия шага — это `step_completed / step_viewed`, поэтому она остаётся
+ *     верной при ветвлении, в отличие от сравнения с соседом по массиву.
  */
 import { getDb } from './db.ts';
 import { CORE_EVENT_TYPES, type FunnelConfig, type StepType } from '@shared/funnel';
@@ -26,29 +17,27 @@ export interface AnalyticsFilters {
   version?: number | null;
   variant?: string | null;
   campaign?: string | null;
-  /** Sessions created by the traffic generator. Included by default. */
+  /** Сессии генератора трафика; включены по умолчанию. */
   includeSynthetic?: boolean;
-  /** Sessions whose variant came from the ?variant= test hatch. Excluded by default. */
+  /** Сессии с вариантом из тестового `?variant=`; по умолчанию исключены. */
   includeOverrides?: boolean;
 }
 
 export interface StepMetrics {
   stepId: string;
   title: string;
-  /** Unique sessions that saw this step at least once. */
+  /** Уникальные сессии, видевшие шаг хотя бы раз. */
   reached: number;
-  /** Unique sessions that answered it and moved on. */
+  /** Уникальные сессии, ответившие и прошедшие дальше. */
   completed: number;
-  /** reached - completed: saw it, never got past it. */
   dropOff: number;
-  /** completed / reached — the step-to-step conversion. */
+  /** completed / reached — конверсия шага в шаг. */
   completionRate: number;
   dropOffRate: number;
-  /** reached / startedSessions — cumulative view of the funnel. */
+  /** reached / startedSessions — накопительный вид воронки. */
   reachFromStart: number;
-  /** Unique sessions that pressed Back on this step. */
   backs: number;
-  /** Total step_viewed events / reached — how often a step gets re-seen. */
+  /** Всего step_viewed / reached — как часто шаг пересматривают. */
   viewsPerSession: number;
 }
 
@@ -59,11 +48,10 @@ export interface SegmentMetrics {
   startedSessions: number;
   resultSessions: number;
   ctaSessions: number;
-  /** Primary metric: unique sessions with cta_clicked / unique sessions started. */
+  /** Основная метрика: уникальные сессии с cta_clicked / уникальные начавшие. */
   ctaClickRate: number;
-  /** Share of starters that reached the result screen. */
   resultRate: number;
-  /** CTR of the CTA among sessions that actually saw the result screen. */
+  /** CTR по CTA среди дошедших до экрана результата. */
   ctaCtrOnResult: number;
   steps: StepMetrics[];
 }
@@ -75,25 +63,20 @@ export interface CustomEventMetric {
 }
 
 /**
- * Two groups, and the split is not cosmetic.
- *
- * `scoped` re-runs under the current filters like every other metric.
- * `allTime` cannot: a suppressed duplicate and a rejected event never became
- * rows, so there is nothing left to attribute to a campaign or a version. They
- * are ingest-wide tallies, and the dashboard labels them as such rather than
- * showing them beside filtered numbers as if they narrowed too.
+ * Две группы, и деление не косметическое: `scoped` пересчитывается под фильтрами,
+ * а `allTime` не может — подавленный дубль и отклонённое событие не стали строками,
+ * поэтому их не к чему отнести ни к кампании, ни к версии.
  */
 export interface DataQuality {
   scoped: {
     totalEvents: number;
     distinctSessions: number;
-    /** Events whose arrival order disagrees with the client's own sequence number. */
+    /** События, чей порядок прихода расходится с client_seq. */
     outOfOrderEvents: number;
-    /** step_viewed events beyond the first per (session, step). */
+    /** step_viewed сверх первого на пару (сессия, шаг). */
     repeatStepViews: number;
   };
   allTime: {
-    /** Duplicate submissions suppressed at write time. */
     duplicatesSuppressed: number;
     rejectedEvents: number;
   };
@@ -111,7 +94,6 @@ export interface AnalyticsReport {
   versions: number[];
   variants: string[];
   experiment: { id: string; variants: string[]; assignment: string } | null;
-  /** Which recommendation people ended up with, by unique session. */
   results: ResultBreakdown[];
 }
 
@@ -130,12 +112,9 @@ interface Where {
 }
 
 /**
- * Build the shared WHERE clause.
- *
- * `extra` clauses are appended AFTER the filter clauses, so a caller that adds
- * its own placeholder appends its value after `params` and the two stay in
- * step. Getting this order wrong silently mislabels every filtered segment,
- * so the contract is: extras last, always.
+ * Общий WHERE. Контракт: `extra` всегда добавляется ПОСЛЕ фильтров, чтобы
+ * вызывающий мог дописать своё значение в конец params. Нарушение порядка молча
+ * искажает каждый отфильтрованный сегмент.
  */
 function buildWhere(f: AnalyticsFilters, extra: string[] = []): Where {
   const clauses = ['e.funnel_key = ?'];
@@ -170,7 +149,7 @@ function distinctSessions(f: AnalyticsFilters, type: string): number {
   return row.n;
 }
 
-/** Ids of steps whose type is `result` — measured separately, not as steps. */
+/** Id шагов типа `result`: они меряются отдельно, а не как вопросы. */
 function resultStepIds(funnelKey: string): Set<string> {
   const ids = new Set<string>();
   for (const cfg of configsFor(funnelKey)) {
@@ -196,11 +175,9 @@ function configsFor(funnelKey: string, version?: number | null): FunnelConfig[] 
 }
 
 /**
- * Canonical step order for the versions in scope.
- *
- * Variants order their steps differently, so there is no single true order. We
- * take the first variant's sequence as the backbone and append anything only
- * other variants or older versions ask, so no step's numbers ever vanish.
+ * Единого «истинного» порядка шагов нет: варианты упорядочивают их по-разному.
+ * Берём первый вариант как основу и дописываем всё, что просят только другие
+ * варианты или старые версии, чтобы ничьи цифры не пропали.
  */
 function stepOrderFor(f: AnalyticsFilters): { id: string; title: string; type: StepType }[] {
   const ordered: { id: string; title: string; type: StepType }[] = [];
@@ -259,13 +236,10 @@ function stepMetrics(f: AnalyticsFilters, startedSessions: number): StepMetrics[
   }[];
 
   const byId = new Map(rows.map((r) => [r.step_id, r]));
-
-  // The result screen carries a step_id on result_viewed / cta_clicked but is
-  // not a question — it has its own metrics on the segment.
   const resultIds = resultStepIds(f.funnelKey);
 
-  // Steps present in the data but not in any known config still get reported,
-  // so a config that was edited outside the app cannot silently hide traffic.
+  // Шаги, которые есть в данных, но не в известных конфигах, тоже показываем:
+  // правка конфига мимо приложения не должна молча прятать трафик.
   const extras = rows.filter(
     (r) => !order.some((o) => o.id === r.step_id) && !resultIds.has(r.step_id),
   );
@@ -278,14 +252,15 @@ function stepMetrics(f: AnalyticsFilters, startedSessions: number): StepMetrics[
     const r = byId.get(id);
     const reached = r?.reached ?? 0;
     const completed = r?.completed ?? 0;
+    const dropOff = Math.max(0, reached - completed);
     return {
       stepId: id,
       title,
       reached,
       completed,
-      dropOff: Math.max(0, reached - completed),
+      dropOff,
       completionRate: safeRate(completed, reached),
-      dropOffRate: safeRate(Math.max(0, reached - completed), reached),
+      dropOffRate: safeRate(dropOff, reached),
       reachFromStart: safeRate(reached, startedSessions),
       backs: r?.backs ?? 0,
       viewsPerSession: safeRate(r?.views ?? 0, reached),
@@ -323,8 +298,7 @@ function dataQuality(f: AnalyticsFilters): DataQuality {
     )
     .get(...w.params) as { events: number; sessions: number };
 
-  // Disagreement between the client's own ordering and our arrival ordering is
-  // the honest definition of "arrived out of order".
+  // «Пришло не по порядку» — это расхождение порядка клиента с порядком нашего приёма.
   const ooo = db
     .prepare(
       `WITH scoped AS (
@@ -376,7 +350,7 @@ function dataQuality(f: AnalyticsFilters): DataQuality {
 function customEvents(f: AnalyticsFilters): CustomEventMetric[] {
   const w = buildWhere(f);
   const placeholders = CORE_EVENT_TYPES.map(() => '?').join(', ');
-  const rows = getDb()
+  return getDb()
     .prepare(
       `SELECT e.type AS type, COUNT(*) AS events, COUNT(DISTINCT e.session_id) AS sessions
        ${BASE_FROM}
@@ -384,14 +358,9 @@ function customEvents(f: AnalyticsFilters): CustomEventMetric[] {
        GROUP BY e.type ORDER BY events DESC`,
     )
     .all(...w.params, ...CORE_EVENT_TYPES) as CustomEventMetric[];
-  return rows;
 }
 
-/**
- * Result distribution, read from the `result_id` property the config declares
- * on `result_viewed` and `cta_clicked`. Counted by unique session, so a refresh
- * of the result screen does not inflate a recommendation's share.
- */
+/** Распределение результатов по свойству `result_id`, которое конфиг объявляет на result_viewed и cta_clicked. */
 function resultBreakdown(f: AnalyticsFilters, total: number): ResultBreakdown[] {
   const w = buildWhere(f, [`e.type IN ('result_viewed', 'cta_clicked')`]);
   const rows = getDb()

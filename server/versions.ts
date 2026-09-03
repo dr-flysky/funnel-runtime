@@ -1,10 +1,9 @@
 /**
- * Version store.
+ * Хранилище версий.
  *
- * Invariants this module exists to protect:
- *  - a published config row is immutable; publishing appends a new row;
- *  - `funnel_active` is a pointer, so rollback is a pointer move, not a delete;
- *  - nothing that fails validation can ever become active.
+ * Инварианты: опубликованная строка неизменяема (публикация только добавляет),
+ * `funnel_active` — указатель, поэтому откат это его сдвиг, а не удаление,
+ * и ничто не прошедшее валидацию не может стать активным.
  */
 import { getDb, nowIso } from './db.ts';
 import { configErrors, type FunnelConfig } from '@shared/funnel';
@@ -23,7 +22,7 @@ export interface VersionSummary {
   id: number;
   funnelKey: string;
   version: number;
-  /** The version the config declared for itself, if any. */
+  /** Версия, объявленная самим конфигом, если есть. */
   sourceVersion: number | null;
   name: string;
   note: string | null;
@@ -122,11 +121,8 @@ function recordActivation(
 }
 
 /**
- * Append a new version and make it active.
- *
- * Existing sessions are untouched: they hold a `version_id` foreign key to
- * their own immutable row, so they keep rendering exactly the config they
- * started on. Only sessions created after this call see the new version.
+ * Добавляет новую версию и делает её активной.
+ * Живые сессии не трогаются: они держат FK на свою неизменяемую строку.
  */
 export function publishVersion(
   config: FunnelConfig,
@@ -152,8 +148,8 @@ export function publishVersion(
       funnelKey,
       version,
       typeof config.version === 'number' ? config.version : null,
-      // Stored verbatim apart from `version`, which the platform owns: it is
-      // what sessions pin to, so it must follow our sequence, not the file's.
+      // Конфиг хранится дословно, кроме `version`: к ней привязываются сессии,
+      // поэтому она следует нашей нумерации, а не той, что в файле.
       JSON.stringify({ ...config, version }),
       opts.note ?? null,
       ts,
@@ -168,11 +164,8 @@ export function publishVersion(
 }
 
 /**
- * Point the funnel at an already-published version.
- *
- * Sessions pinned to the version we are leaving keep running on it — we never
- * migrate a live session across configs, because the answers it has already
- * given were validated against the config it started with.
+ * Переключает воронку на уже опубликованную версию.
+ * Сессии со старой версии продолжают на ней: их ответы валидировались по тому конфигу.
  */
 export function activateVersion(
   funnelKey: string,
@@ -188,7 +181,7 @@ export function activateVersion(
   return listVersions(funnelKey).find((v) => v.id === versionId)!;
 }
 
-/** Roll back to the version that was active immediately before the current one. */
+/** Откат на версию, активную непосредственно перед текущей. */
 export function rollbackToPrevious(funnelKey: string, note?: string): VersionSummary {
   const db = getDb();
   const history = db

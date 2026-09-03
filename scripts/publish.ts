@@ -1,4 +1,4 @@
-/** Publish a config file as a new active version: npm run publish -- <file> */
+/** Публикует файл конфига как новую активную версию: npm run publish -- <file> */
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDb } from '../server/db.ts';

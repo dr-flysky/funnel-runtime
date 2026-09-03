@@ -1,10 +1,6 @@
 /**
- * `node:sqlite` shim.
- *
- * The module is a genuine Node builtin, but it is newer than the builtin lists
- * that Vite and Vitest resolve against, so a static `import` from those tools
- * fails with "Failed to load url sqlite". Loading it through createRequire
- * keeps it opaque to static analysis while behaving identically at runtime.
+ * Шим над `node:sqlite`: модуль встроенный, но новее списков builtin'ов в Vite и Vitest,
+ * поэтому статический import у них падает. createRequire прячет его от статического анализа.
  */
 import { createRequire } from 'node:module';
 

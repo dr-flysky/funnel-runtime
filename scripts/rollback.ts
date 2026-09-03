@@ -1,4 +1,4 @@
-/** Roll the funnel back to the previously active version: npm run rollback */
+/** Откатывает воронку на предыдущую активную версию: npm run rollback */
 import { getDb } from '../server/db.ts';
 import { rollbackToPrevious, listVersions } from '../server/versions.ts';
 

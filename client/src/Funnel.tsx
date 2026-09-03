@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, type SessionView } from './api';
 import { tracker } from './tracker';
 import { t } from './strings';
-import type { AnswerValue, StepDef } from '@shared/funnel';
+import { KNOWN_CTA_ACTIONS, type AnswerValue, type StepDef } from '@shared/funnel';
 
 const SESSION_KEY = (funnelKey: string) => `funnel_runtime.session.${funnelKey}`;
 
@@ -21,6 +21,10 @@ function currentStep(view: SessionView): StepDef | null {
   return view.funnel.steps.find((s) => s.id === view.currentStep) ?? null;
 }
 
+/** Сессия, в которую сервер больше не примет запись (истекла или база очищена): лечится только новым стартом. */
+const isGone = (err: unknown): boolean =>
+  err instanceof ApiError && (err.status === 404 || err.status === 410);
+
 export default function Funnel({ funnelKey }: { funnelKey: string }) {
   const [view, setView] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -30,15 +34,6 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
   const [busy, setBusy] = useState(false);
   const viewedRef = useRef<string | null>(null);
 
-  /**
-   * A session the server will no longer accept writes for — past its TTL, or
-   * from a wiped database. Both are recoverable in exactly one way: drop the
-   * stored id and start again.
-   */
-  const isGone = (err: unknown): boolean =>
-    err instanceof ApiError && (err.status === 404 || err.status === 410);
-
-  // ---- start a brand-new session ------------------------------------------
   const startFresh = useCallback(async (): Promise<SessionView> => {
     localStorage.removeItem(SESSION_KEY(funnelKey));
     const params = new URLSearchParams(window.location.search);
@@ -49,7 +44,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     return created;
   }, [funnelKey]);
 
-  // ---- boot: resume the stored session, or start a new one -----------------
+  // Старт: восстановить сохранённую сессию, иначе начать новую.
   useEffect(() => {
     let cancelled = false;
 
@@ -62,7 +57,6 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
             if (!cancelled) setView(resumed);
             return;
           } catch (err) {
-            // Expired, or a session from a wiped database: start fresh.
             if (!isGone(err)) throw err;
             if (!cancelled && err instanceof ApiError && err.status === 410) {
               setNotice(t.expiry.onBoot);
@@ -82,7 +76,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     };
   }, [funnelKey, startFresh]);
 
-  // ---- one step_viewed / result_viewed per arrival ------------------------
+  // Ровно один step_viewed / result_viewed на попадание на экран.
   useEffect(() => {
     if (!view) return;
     const marker = `${view.sessionId}:${view.currentStep ?? 'result'}:${view.completed}`;
@@ -91,13 +85,10 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
 
     const step = currentStep(view);
     if (view.completed || step?.type === 'result') {
-      // Declared properties for result_viewed: result_id.
       tracker.track(view.sessionId, 'result_viewed', view.currentStep, {
         result_id: view.resultId,
       });
     } else if (step) {
-      // Declared properties for step_viewed: step_type, visible_step_index,
-      // visible_step_count.
       tracker.track(view.sessionId, 'step_viewed', step.id, {
         step_type: step.type,
         visible_step_index: view.progress.visibleIndex,
@@ -106,7 +97,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     }
   }, [view?.sessionId, view?.currentStep, view?.completed]);
 
-  // ---- seed the input from whatever the user already answered -------------
+  // Подставить в поле уже данный ответ.
   useEffect(() => {
     if (!view) return;
     setFieldError(null);
@@ -125,19 +116,14 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       const next = await api.answer(view.sessionId, step.id, draft);
 
       if (step.type !== 'info') {
-        // Declared property for answer_submitted: answer_kind, and nothing
-        // else — the config sets events.privacy.storeRawAnswers to false.
         tracker.track(view.sessionId, 'answer_submitted', step.id, next.answerSummary ?? {});
       }
-      // Declared property for step_completed: next_step_id.
       tracker.track(view.sessionId, 'step_completed', step.id, {
         next_step_id: next.currentStep ?? null,
       });
       setView(next);
     } catch (err) {
-      // A tab left open past the TTL: the answer is refused, so rather than
-      // stranding the user on a funnel that can no longer be submitted, start
-      // them over and say why.
+      // Вкладка простояла дольше TTL: не оставляем пользователя на воронке, которую уже не отправить.
       if (isGone(err)) {
         setNotice(t.expiry.midSession);
         setView(await startFresh());
@@ -156,7 +142,6 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     setBusy(true);
     try {
       const back = await api.back(view.sessionId);
-      // Declared property for back_clicked: destination_step_id.
       tracker.track(view.sessionId, 'back_clicked', view.currentStep, {
         destination_step_id: back.currentStep,
       });
@@ -166,7 +151,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
         setNotice(t.expiry.midSession);
         setView(await startFresh());
       } else if (!(err instanceof ApiError && err.status === 400)) {
-        // A 400 here just means "already at the first step" — not worth a message.
+        // 400 здесь означает лишь «уже на первом шаге» — сообщать не о чем.
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
@@ -278,19 +263,10 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
 }
 
 /**
- * CTA behaviour is named by the config, not chosen by the client.
- *
- * `expand_recommendation` is what funnel-v1.json asks for on every result, so
- * the action list is withheld until the CTA is pressed — that is what makes the
- * click a real signal rather than a decorative one, and it is what the primary
- * metric (cta_click_rate) is measuring.
- *
- * An action the client does not recognise still records the click and reveals
- * whatever detail the result carries, so a future config naming a new action
- * degrades to something sensible instead of a dead button.
+ * Поведение CTA задаёт конфиг, а не клиент: `expand_recommendation` придерживает
+ * список действий до нажатия, поэтому клик — настоящий сигнал, а не украшение.
+ * Незнакомое действие всё равно засчитывается и раскрывает рекомендацию.
  */
-const KNOWN_CTA_ACTIONS = new Set(['expand_recommendation']);
-
 function ResultScreen({
   view,
   onRestart,
@@ -303,7 +279,6 @@ function ResultScreen({
   const [expanded, setExpanded] = useState(false);
   const result = view.result;
 
-  // A new result means a fresh, un-expanded screen.
   useEffect(() => {
     setExpanded(false);
   }, [view.resultId, view.sessionId]);
@@ -325,13 +300,12 @@ function ResultScreen({
   const recommendations = result.recommendations ?? [];
 
   const onCta = () => {
-    // Declared properties for cta_clicked: result_id, action.
     tracker.track(view.sessionId, 'cta_clicked', view.currentStep, {
       result_id: result.id,
       action: result.cta.action,
     });
 
-    if (!KNOWN_CTA_ACTIONS.has(result.cta.action)) {
+    if (!KNOWN_CTA_ACTIONS.includes(result.cta.action)) {
       console.warn(
         `[funnel] unrecognised cta action "${result.cta.action}"; expanding the recommendation as a fallback.`,
       );
@@ -376,28 +350,20 @@ function ResultScreen({
 }
 
 /**
- * Optional inline help for a question, drawn from the step's own `content.body`
- * — a field info screens render directly but questions otherwise ignore.
- *
- * Two independent switches, deliberately:
- *   - the *affordance* appears when the step supplies help copy;
- *   - the *event* fires only when the session's version declares `help_opened`.
- *
- * So a config can add help text to a step without inventing an event, or
- * declare the event and start measuring, and neither needs a client release.
- * Emitting an undeclared event would be rejected by ingest anyway.
+ * Встроенная подсказка из `content.body` шага. Два независимых переключателя:
+ * кнопка появляется, если у шага есть текст, а событие шлётся, только если версия
+ * объявила `help_opened`. Поэтому и текст, и метрику можно добавить без релиза клиента.
  */
 function StepHelp({ step, view }: { step: StepDef; view: SessionView }) {
   const [open, setOpen] = useState(false);
   const body = step.content.body;
 
-  // Info screens already render `body` as their main copy.
+  // Информационные экраны и так показывают `body` как основной текст.
   if (!body || step.type === 'info') return null;
 
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    // Declared property for help_opened: surface.
     if (next && view.funnel.allowedEvents.includes('help_opened')) {
       tracker.track(view.sessionId, 'help_opened', step.id, { surface: 'inline' });
     }

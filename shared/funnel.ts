@@ -1,30 +1,14 @@
 /**
- * Funnel Runtime — shared, dependency-free funnel engine.
+ * Движок воронки: чистые функции без I/O, общие для сервера, клиента и тестов.
  *
- * Speaks the supplied config schema (`schemaVersion` 1.0) natively: the JSON
- * that is published is the JSON that is stored and executed, with no
- * translation layer to drift out of sync.
- *
- * The navigation model is deliberately the one the config describes:
- *   - each variant supplies a full ordered `stepSequence`
- *   - a step may carry `visibleWhen`, which hides it for some answers
- *   - the visible path is the sequence filtered by those predicates
- *
- * That is branching by *visibility* rather than by graph edges. It cannot
- * produce an unreachable step or a dangling target, which is why the engine
- * has no transition-repair logic.
- *
- * Pure: no I/O, no globals. Imported by the server, the client and the tests so
- * that all three agree on what the funnel does.
+ * Навигация — это `stepSequence` варианта, отфильтрованный предикатами
+ * `visibleWhen`. Ветвление через видимость, а не через рёбра графа, поэтому
+ * недостижимый шаг или висящий переход невозможны в принципе.
  */
 
-// ---------------------------------------------------------------------------
-// Config types
-// ---------------------------------------------------------------------------
+// --- Типы конфига ----------------------------------------------------------
 
 export type StepType = 'info' | 'number' | 'single-select' | 'multi-select' | 'result';
-
-export const INTERACTIVE_TYPES: StepType[] = ['number', 'single-select', 'multi-select'];
 
 export interface StepContent {
   eyebrow?: string;
@@ -55,7 +39,7 @@ export interface StepValidation {
   required?: boolean;
   minSelections?: number;
   maxSelections?: number;
-  /** Config-supplied copy, keyed by rule name. The engine never invents text. */
+  /** Тексты ошибок из конфига по имени правила; движок ничего не выдумывает. */
   messages?: Record<string, string>;
 }
 
@@ -66,7 +50,7 @@ export type Operator =
   | 'contains' | 'not_contains'
   | 'answered' | 'not_answered';
 
-/** A leaf predicate: compare one previous answer against a value. */
+/** Лист предиката: сравнение одного прошлого ответа со значением. */
 export interface ConditionLeaf {
   answer: string;
   operator: Operator;
@@ -172,11 +156,7 @@ type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]>
 export type AnswerValue = string | string[] | number | null;
 export type Answers = Record<string, AnswerValue>;
 
-/**
- * A config with one variant's sequence and overrides already applied: an
- * ordered step list and a merged result set. This is what the client receives,
- * so the browser never has to know a variant exists.
- */
+/** Конфиг с уже применёнными последовательностью и оверрайдами варианта: клиент не знает о вариантах. */
 export interface ResolvedFunnel {
   funnelId: string;
   version: number;
@@ -190,18 +170,11 @@ export interface ResolvedFunnel {
   defaultResultId: string;
   progress: ProgressPolicy;
   session: SessionPolicy;
-  /**
-   * Event names this version declares. The client renders an affordance only
-   * when the config asks for its event, so a config can introduce one — and the
-   * UI that produces it — without a client release. Ingest checks the same list
-   * server-side, so this is a hint, not a permission.
-   */
+  /** Подсказка клиенту, какие события объявлены версией; приём событий проверяет тот же список сам. */
   allowedEvents: string[];
 }
 
-// ---------------------------------------------------------------------------
-// Event catalogue
-// ---------------------------------------------------------------------------
+// --- Каталог событий -------------------------------------------------------
 
 export const CORE_EVENT_TYPES = [
   'session_started',
@@ -213,13 +186,7 @@ export const CORE_EVENT_TYPES = [
   'cta_clicked',
 ] as const;
 
-export type CoreEventType = (typeof CORE_EVENT_TYPES)[number];
-
-/**
- * Event names are validated by shape, not against a fixed list, so a future
- * config version can introduce an event without a schema migration or a server
- * change. `allowedEventNames` narrows that to what a given version declares.
- */
+/** Имена событий проверяются по форме, а не по списку: новое событие не требует миграции схемы. */
 export const EVENT_NAME_PATTERN = /^[a-z][a-z0-9_]{2,63}$/;
 
 export function isValidEventName(name: string): boolean {
@@ -234,15 +201,13 @@ export function allowedEventNames(config: FunnelConfig): Set<string> {
   return names;
 }
 
-// ---------------------------------------------------------------------------
-// Deep merge (used by stepOverrides / resultOverrides)
-// ---------------------------------------------------------------------------
+// --- Слияние оверрайдов ----------------------------------------------------
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** Recursive merge; arrays are replaced wholesale, not concatenated. */
+/** Рекурсивное слияние; массивы заменяются целиком, а не склеиваются. */
 function deepMerge<T>(base: T, patch: unknown): T {
   if (!isPlainObject(patch)) return (patch === undefined ? base : (patch as T));
   if (!isPlainObject(base)) return patch as T;
@@ -254,17 +219,9 @@ function deepMerge<T>(base: T, patch: unknown): T {
   return out as T;
 }
 
-// ---------------------------------------------------------------------------
-// Variant resolution
-// ---------------------------------------------------------------------------
+// --- Разрешение варианта ---------------------------------------------------
 
-/**
- * Build the concrete funnel a given variant sees.
- *
- * An unknown variant falls back to the first declared one rather than throwing,
- * so a session pinned to an old version can never be bricked by a config that
- * no longer defines its variant.
- */
+/** Неизвестный вариант откатывается к первому объявленному: сессия на старой версии не должна ломаться. */
 export function resolveVariant(config: FunnelConfig, variant: string): ResolvedFunnel {
   const variants = config.experiment?.variants ?? {};
   const key = variants[variant] ? variant : Object.keys(variants).sort()[0];
@@ -277,7 +234,7 @@ export function resolveVariant(config: FunnelConfig, variant: string): ResolvedF
   const steps: StepDef[] = [];
   for (const id of sequence) {
     const base = config.steps?.[id];
-    if (!base) continue; // a sequence naming an unknown step simply skips it
+    if (!base) continue; // неизвестный шаг в последовательности просто пропускаем
     const override = def?.stepOverrides?.[id];
     steps.push(override ? deepMerge(base, override) : base);
   }
@@ -305,9 +262,7 @@ export function resolveVariant(config: FunnelConfig, variant: string): ResolvedF
   };
 }
 
-// ---------------------------------------------------------------------------
-// Condition evaluation
-// ---------------------------------------------------------------------------
+// --- Вычисление условий ----------------------------------------------------
 
 function toNumber(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -321,7 +276,7 @@ function isAnswered(v: AnswerValue | undefined): boolean {
   return true;
 }
 
-export function evaluateLeaf(cond: ConditionLeaf, answers: Answers): boolean {
+function evaluateLeaf(cond: ConditionLeaf, answers: Answers): boolean {
   const actual = answers[cond.answer];
 
   switch (cond.operator) {
@@ -358,7 +313,7 @@ export function evaluateLeaf(cond: ConditionLeaf, answers: Answers): boolean {
   }
 }
 
-/** Evaluate a condition tree. An absent node means "always true". */
+/** Вычисляет дерево условий; отсутствующий узел означает «всегда истина». */
 export function evaluateCondition(node: ConditionNode | undefined, answers: Answers): boolean {
   if (!node) return true;
 
@@ -377,7 +332,7 @@ export function evaluateCondition(node: ConditionNode | undefined, answers: Answ
   return true;
 }
 
-/** Every answer id a condition tree reads. Used by config validation. */
+/** Все id ответов, которые читает дерево условий; нужно валидации конфига. */
 export function conditionDependencies(node: ConditionNode | undefined, out: Set<string> = new Set()): Set<string> {
   if (!node) return out;
   if ('all' in node && Array.isArray(node.all)) node.all.forEach((c) => conditionDependencies(c, out));
@@ -387,18 +342,13 @@ export function conditionDependencies(node: ConditionNode | undefined, out: Set<
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Navigation
-// ---------------------------------------------------------------------------
+// --- Навигация -------------------------------------------------------------
 
 export function stepById(funnel: ResolvedFunnel, id: string): StepDef | undefined {
   return funnel.steps.find((s) => s.id === id);
 }
 
-/**
- * The steps this user actually sees, in order: the variant's sequence with
- * every `visibleWhen` predicate applied against their own answers.
- */
+/** Шаги, которые пользователь реально видит: последовательность варианта с применёнными visibleWhen. */
 export function visibleSteps(funnel: ResolvedFunnel, answers: Answers): StepDef[] {
   return funnel.steps.filter((s) => evaluateCondition(s.visibleWhen, answers));
 }
@@ -408,18 +358,12 @@ export function firstStepId(funnel: ResolvedFunnel, answers: Answers = {}): stri
   return visible.length > 0 ? visible[0].id : null;
 }
 
-/**
- * The next visible step after `currentId`, or null at the end of the funnel.
- *
- * Recomputed from the answers every time, so an answer that hides a later step
- * takes effect immediately — including when the user goes back and changes it.
- */
+/** Путь пересчитывается по текущим ответам, поэтому правка ответа сразу скрывает или открывает шаги. */
 export function nextStepId(funnel: ResolvedFunnel, currentId: string, answers: Answers): string | null {
   const visible = visibleSteps(funnel, answers);
   const idx = visible.findIndex((s) => s.id === currentId);
   if (idx === -1) {
-    // The current step just became invisible; fall forward to the first
-    // visible step that follows it in the underlying sequence.
+    // Текущий шаг только что стал невидимым — уходим вперёд к ближайшему видимому.
     const seqIdx = funnel.steps.findIndex((s) => s.id === currentId);
     if (seqIdx === -1) return visible[0]?.id ?? null;
     const after = funnel.steps.slice(seqIdx + 1).map((s) => s.id);
@@ -428,7 +372,6 @@ export function nextStepId(funnel: ResolvedFunnel, currentId: string, answers: A
   return idx + 1 < visible.length ? visible[idx + 1].id : null;
 }
 
-/** The previous visible step before `currentId`, or null at the start. */
 export function previousStepId(funnel: ResolvedFunnel, currentId: string, answers: Answers): string | null {
   const visible = visibleSteps(funnel, answers);
   const idx = visible.findIndex((s) => s.id === currentId);
@@ -436,29 +379,21 @@ export function previousStepId(funnel: ResolvedFunnel, currentId: string, answer
   return visible[idx - 1].id;
 }
 
-export function isResultStep(step: StepDef | undefined): boolean {
-  return step?.type === 'result';
-}
-
-// ---------------------------------------------------------------------------
-// Progress
-// ---------------------------------------------------------------------------
+// --- Прогресс --------------------------------------------------------------
 
 export interface Progress {
-  /** 1-based position among the steps that count toward progress. */
+  /** Позиция среди шагов, попадающих в прогресс (с единицы). */
   position: number;
   total: number;
   percent: number;
-  /** Index and count over *all* visible steps, for the step_viewed event. */
+  /** Индекс и количество среди всех видимых шагов — для события step_viewed. */
   visibleIndex: number;
   visibleCount: number;
 }
 
 /**
- * Progress honours the config's own policy: `countVisibleOnly` restricts the
- * denominator to steps this user can reach, and `excludeTypes` drops screens
- * that are not questions (info and result) so the bar measures work remaining,
- * not screens remaining.
+ * Прогресс считается по политике конфига: `countVisibleOnly` сужает знаменатель до достижимых
+ * шагов, `excludeTypes` убирает не-вопросы, чтобы шкала мерила работу, а не экраны.
  */
 export function computeProgress(
   funnel: ResolvedFunnel,
@@ -474,16 +409,13 @@ export function computeProgress(
 
   const visibleIndex = currentId ? visible.findIndex((s) => s.id === currentId) : visible.length;
   const countedIdx = currentId ? counted.findIndex((s) => s.id === currentId) : -1;
-
   const total = Math.max(counted.length, 1);
 
-  // On an excluded screen (intro/result) we report the boundary rather than a
-  // position that does not exist in the counted set.
-  const position = countedIdx >= 0 ? countedIdx + 1 : currentId === null ? total : Math.min(total, countedBefore(counted, visible, currentId) + 1);
+  // На исключённом экране (интро, результат) позиции в counted нет — берём границу.
   const done = countedIdx >= 0 ? countedIdx : countedBefore(counted, visible, currentId);
 
   return {
-    position: Math.min(position, total),
+    position: Math.min(done + 1, total),
     total,
     percent: Math.max(0, Math.min(100, Math.round((done / total) * 100))),
     visibleIndex: visibleIndex === -1 ? 0 : visibleIndex,
@@ -491,7 +423,7 @@ export function computeProgress(
   };
 }
 
-/** How many counted steps sit before `currentId` in the visible order. */
+/** Сколько учитываемых шагов стоит перед `currentId` в видимом порядке. */
 function countedBefore(counted: StepDef[], visible: StepDef[], currentId: string | null): number {
   if (!currentId) return counted.length;
   const pos = visible.findIndex((s) => s.id === currentId);
@@ -500,25 +432,16 @@ function countedBefore(counted: StepDef[], visible: StepDef[], currentId: string
   return counted.filter((s) => before.has(s.id)).length;
 }
 
-// ---------------------------------------------------------------------------
-// Answer validation
-// ---------------------------------------------------------------------------
+// --- Валидация ответов -----------------------------------------------------
 
 export interface ValidationResult {
   ok: boolean;
   error?: string;
-  /** The coerced value to persist (numeric strings become numbers). */
+  /** Значение для сохранения; числовые строки приводятся к числу. */
   value?: AnswerValue;
 }
 
-/**
- * Prefer the config's own copy, trying keys from most to least specific.
- *
- * An empty multi-select violates both `required` and `minSelections`; a config
- * may supply copy for either. Taking the first key that exists means we use the
- * author's wording rather than falling through to generic engine text just
- * because they chose the other name.
- */
+/** Берёт первый существующий ключ — от частного к общему, чтобы победила формулировка автора конфига. */
 function message(step: StepDef, keys: string | string[], fallback: string): string {
   const messages = step.validation?.messages;
   if (messages) {
@@ -610,15 +533,9 @@ export function validateAnswer(step: StepDef, raw: unknown): ValidationResult {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Result selection
-// ---------------------------------------------------------------------------
+// --- Выбор результата ------------------------------------------------------
 
-/**
- * First matching rule wins; `defaultResultId` catches everyone else. Order in
- * the config is therefore significant, and validation checks the default
- * exists so a session can never reach a result screen that is not defined.
- */
+/** Выигрывает первое подошедшее правило, поэтому порядок в конфиге значим; иначе `defaultResultId`. */
 export function resolveResultId(funnel: ResolvedFunnel, answers: Answers): string {
   for (const rule of funnel.resultRules) {
     if (evaluateCondition(rule.when, answers)) return rule.resultId;
@@ -626,17 +543,11 @@ export function resolveResultId(funnel: ResolvedFunnel, answers: Answers): strin
   return funnel.defaultResultId;
 }
 
-export function resolveResult(funnel: ResolvedFunnel, answers: Answers): ResultDef | undefined {
-  return funnel.results[resolveResultId(funnel, answers)];
-}
-
-// ---------------------------------------------------------------------------
-// Analytics-safe answer summaries
-// ---------------------------------------------------------------------------
+// --- Безопасная для аналитики сводка ответа --------------------------------
 
 export type AnswerKind = 'single_select' | 'multi_select' | 'number' | 'none';
 
-export function answerKind(step: StepDef): AnswerKind {
+function answerKind(step: StepDef): AnswerKind {
   switch (step.type) {
     case 'single-select': return 'single_select';
     case 'multi-select': return 'multi_select';
@@ -646,21 +557,14 @@ export function answerKind(step: StepDef): AnswerKind {
 }
 
 /**
- * What an `answer_submitted` event is allowed to carry.
- *
- * The config sets `events.privacy.storeRawAnswers: false` and declares
- * `answer_submitted` with exactly one property, `answer_kind`. So this returns
- * the kind and nothing else — not the chosen option, not the number, not a
- * bucket. Raw answers live only in the session store, which
- * `session.persistAnswers: true` explicitly permits.
+ * Всё, что вправе нести `answer_submitted`, — только вид ответа.
+ * Сырые ответы живут лишь в хранилище сессий: конфиг ставит `storeRawAnswers: false`.
  */
 export function summariseAnswer(step: StepDef): Record<string, unknown> {
   return { answer_kind: answerKind(step) };
 }
 
-// ---------------------------------------------------------------------------
-// Config validation (run at publish time)
-// ---------------------------------------------------------------------------
+// --- Валидация конфига (на публикации) -------------------------------------
 
 export interface ConfigIssue {
   level: 'error' | 'warning';
@@ -669,13 +573,10 @@ export interface ConfigIssue {
 
 const VALID_TYPES: StepType[] = ['info', 'number', 'single-select', 'multi-select', 'result'];
 
-/** CTA actions the client knows how to perform. Kept in step with Funnel.tsx. */
+/** Действия CTA, которые умеет выполнять клиент; тот же список используется в Funnel.tsx. */
 export const KNOWN_CTA_ACTIONS = ['expand_recommendation'];
 
-/**
- * Structural checks. A config with errors is refused at publish time, so a
- * broken version can never become active and strand live traffic.
- */
+/** Конфиг с ошибками не публикуется, поэтому сломанная версия не может стать активной. */
 export function validateConfig(config: FunnelConfig): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
   const err = (m: string) => issues.push({ level: 'error', message: m });
@@ -714,8 +615,7 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
     if (step.type === 'number' && !step.input) {
       err(`step "${id}" needs an input block.`);
     }
-    // The engine only knows how to derive a result from `resultRules`; a config
-    // naming another source would silently fall through to the default result.
+    // Другой resultSource молча провалился бы в результат по умолчанию.
     if (step.type === 'result' && step.resultSource && step.resultSource !== 'resultRules') {
       err(`step "${id}" declares unsupported resultSource "${step.resultSource}".`);
     }
@@ -727,7 +627,6 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
     }
   }
 
-  // --- results -------------------------------------------------------------
   const resultIds = new Set(Object.keys(config.results ?? {}));
   if (resultIds.size === 0) err('results must define at least one result.');
   if (!config.defaultResultId) err('defaultResultId is required.');
@@ -743,13 +642,11 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
     if (!result.cta?.label || !result.cta?.action) {
       err(`result "${id}" needs a cta with a label and an action.`);
     } else if (!KNOWN_CTA_ACTIONS.includes(result.cta.action)) {
-      // A warning, not an error: the client falls back to revealing the
-      // recommendation, so an unknown action degrades rather than breaking.
+      // Не ошибка: клиент откатится к раскрытию рекомендации, поведение деградирует, а не ломается.
       warn(`result "${id}" uses cta action "${result.cta.action}", which the client does not implement.`);
     }
   }
 
-  // --- experiment and per-variant sequences --------------------------------
   const variants = Object.entries(config.experiment?.variants ?? {});
   if (variants.length < 2) err('experiment.variants must define at least two variants.');
   if (!config.experiment?.id) warn('experiment.id is empty.');
@@ -757,11 +654,8 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
     warn('experiment.assignment is not "server"; this runtime always assigns on the server.');
   }
 
-  let branchCount = 0;
-  for (const step of Object.values(steps)) {
-    if (step.visibleWhen) branchCount += 1;
-  }
-  if (branchCount === 0 && (config.resultRules ?? []).length === 0) {
+  const hasBranch = Object.values(steps).some((step) => step.visibleWhen);
+  if (!hasBranch && (config.resultRules ?? []).length === 0) {
     err('the config must contain at least one conditional branch (visibleWhen or resultRules).');
   }
 
@@ -789,9 +683,8 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
       if (!resultIds.has(id)) warn(`variant "${key}" overrides unknown result "${id}".`);
     }
 
-    // A visibleWhen must depend on an answer collected earlier in THIS
-    // variant's order, otherwise the predicate silently evaluates against an
-    // absent answer and the step vanishes for everyone.
+    // visibleWhen обязан зависеть от ответа, собранного раньше в этом же варианте,
+    // иначе предикат считается по отсутствующему ответу и шаг исчезает у всех.
     const position = new Map(sequence.map((id, i) => [id, i]));
     for (const id of sequence) {
       const step = steps[id];
@@ -807,7 +700,6 @@ export function validateConfig(config: FunnelConfig): ConfigIssue[] {
     }
   }
 
-  // --- events --------------------------------------------------------------
   for (const e of config.events?.allowed ?? []) {
     if (!isValidEventName(e.name)) err(`events.allowed contains invalid event name "${e.name}".`);
   }

@@ -8,11 +8,10 @@ import { publishVersion, type VersionSummary } from '../server/versions.ts';
 import { createApp } from '../server/app.ts';
 import type { FunnelConfig } from '@shared/funnel';
 
-/** Fresh in-memory database for each test, so nothing leaks between them. */
+/** Своя in-memory база на каждый тест, чтобы ничего не перетекало между ними. */
 export function useFreshDb(): void {
   setDb(openDb(':memory:'));
-  // Version ids restart from 1 in a new database, so the memoised
-  // declared-event lookup must not survive the swap.
+  // В новой базе id версий начинаются с 1, поэтому кэш объявленных событий пережить подмену не должен.
   resetEventCaches();
 }
 
@@ -28,14 +27,13 @@ export function seedV1(): VersionSummary {
 }
 
 /**
- * A stand-in for the not-yet-supplied iteration-2 config, derived from v1 so
- * the tests exercise the shapes iteration 2 is specified to introduce: a new
- * conditional branch, a step dropped for one variant, and a new event.
+ * Заглушка ещё не присланного конфига итерации 2, собранная из v1: новая ветка по условию,
+ * шаг, убранный у одного варианта, и новое событие.
  */
 export function makeV2(): FunnelConfig {
   const cfg = loadConfig('funnel-v1.json');
 
-  // 1. a new step behind a new condition
+  // 1. новый шаг за новым условием
   cfg.steps.meeting_load = {
     id: 'meeting_load',
     type: 'number',
@@ -45,7 +43,7 @@ export function makeV2(): FunnelConfig {
     visibleWhen: { answer: 'async_maturity', operator: 'in', value: ['low', 'medium'] },
   };
 
-  // 2. variant A gains it; variant B drops `tool_count` entirely
+  // 2. вариант A получает его, вариант B полностью теряет `tool_count`
   const A = cfg.experiment.variants.A;
   const B = cfg.experiment.variants.B;
   A.stepSequence = A.stepSequence.flatMap((id) =>
@@ -53,7 +51,7 @@ export function makeV2(): FunnelConfig {
   );
   B.stepSequence = B.stepSequence.filter((id) => id !== 'tool_count');
 
-  // 3. a new event type, declared by the config alone
+  // 3. новый тип события, объявленный только конфигом
   cfg.events!.allowed!.push({
     name: 'help_opened',
     trigger: 'The user opens inline help on a step.',
@@ -75,7 +73,7 @@ export interface TestServer {
   get: (path: string) => Promise<any>;
 }
 
-/** Boot the real app on an ephemeral port. */
+/** Поднимает настоящее приложение на случайном порту. */
 export async function startServer(): Promise<TestServer> {
   const server: Server = createApp().listen(0);
   await new Promise<void>((resolve) => server.once('listening', () => resolve()));
@@ -101,7 +99,7 @@ export async function startServer(): Promise<TestServer> {
   };
 }
 
-/** Minimal valid event envelope. */
+/** Минимальный валидный конверт события. */
 export function makeEvent(
   sessionId: string,
   type: string,

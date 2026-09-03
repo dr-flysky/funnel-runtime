@@ -1,11 +1,11 @@
-/** Process entry point: boot the API (and the built client, if present). */
+/** Точка входа: поднимает API и, если он собран, статический клиент. */
 import { createApp } from './app.ts';
 import { getDb } from './db.ts';
 import { listFunnelKeys } from './versions.ts';
 
 const port = Number(process.env.PORT ?? 3000);
 
-getDb(); // open + migrate before accepting traffic
+getDb(); // открыть и мигрировать БД до приёма трафика
 
 const app = createApp();
 app.listen(port, () => {

@@ -1,17 +1,16 @@
 /**
- * Session TTL.
+ * TTL сессии (`session.ttlHours: 72`).
  *
- * The config sets `session.ttlHours: 72`. Every write route already refuses an
- * expired session; the danger is the *read* route disagreeing with them, which
- * hands the client a funnel it can render but never submit. These tests pin the
- * contract: a session the server will not write to is not a session it serves.
+ * Запись в протухшую сессию и так запрещена; опасность — если чтение с этим
+ * разойдётся и отдаст клиенту воронку, которую он нарисует, но не отправит.
+ * Контракт: сессия, в которую сервер не пишет, им и не отдаётся.
  */
 import { beforeEach, describe, expect, it, afterEach } from 'vitest';
 import { FUNNEL, seedV1, startServer, useFreshDb, type TestServer } from './helpers.ts';
 import { createSession, getSession, isExpired, funnelForSession } from '../server/sessions.ts';
 import { getDb } from '../server/db.ts';
 
-/** Backdate a session so it is past the config's TTL. */
+/** Сдвигает дату создания сессии назад, за пределы TTL из конфига. */
 function age(sessionId: string, hours: number): void {
   const when = new Date(Date.now() - hours * 3_600_000).toISOString();
   getDb().prepare('UPDATE sessions SET created_at = ? WHERE session_id = ?').run(when, sessionId);
@@ -47,11 +46,7 @@ describe('session expiry', () => {
     expect(res.currentStep).toBe('intro');
   });
 
-  /**
-   * The bug this file exists for: resume answered 200 with a renderable view
-   * while `answer` answered 400, so the user got a funnel that died on the
-   * first Continue with no way to recover.
-   */
+  /** Баг, ради которого написан файл: чтение отдавало 200, а запись 400 — воронка умирала на первом «Продолжить». */
   it('refuses to resume an expired session, rather than serving a dead view', async () => {
     const session = createSession({ funnelKey: FUNNEL });
     age(session.sessionId, 100);
@@ -80,7 +75,7 @@ describe('session expiry', () => {
     expect((await server.get('/api/session/no-such-session')).status).toBe(404);
 
     const session = createSession({ funnelKey: FUNNEL });
-    // Wrong step id: the user can fix this in place, so it stays a 400.
+    // Неверный id шага: чинится на месте, поэтому остаётся 400.
     const stale = await server.post(`/api/session/${session.sessionId}/answer`, {
       stepId: 'tool_count',
       value: 3,
@@ -93,7 +88,7 @@ describe('session expiry', () => {
     age(expired.sessionId, 100);
     expect((await server.get(`/api/session/${expired.sessionId}`)).status).toBe(410);
 
-    // What the client does with a 410: drop the id and start over.
+    // Что клиент делает с 410: забывает id и начинает заново.
     const fresh = await server.post('/api/session', { funnelKey: FUNNEL });
     expect(fresh.status).toBe(201);
     expect(fresh.sessionId).not.toBe(expired.sessionId);

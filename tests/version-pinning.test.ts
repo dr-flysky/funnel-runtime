@@ -1,7 +1,4 @@
-/**
- * Requirement 7.1: "закрепление версии за сессией" — a session is pinned to the
- * version it started on, and a publish must not move it.
- */
+/** Закрепление версии за сессией: сессия остаётся на версии, где стартовала, и публикация её не двигает. */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FUNNEL, publishV2, seedV1, useFreshDb } from './helpers.ts';
 import { buildView, createSession, getSession, submitAnswer } from '../server/sessions.ts';
@@ -34,14 +31,13 @@ describe('version pinning', () => {
   });
 
   it('keeps an in-flight session usable across a publish', () => {
-    // Pin the variant so the step after `intro` is deterministic: variant B
-    // reorders the funnel to ask for the amount first.
+    // Фиксируем вариант, чтобы шаг после `intro` был детерминирован: B меняет порядок вопросов.
     const session = createSession({ funnelKey: FUNNEL, variantOverride: 'A' });
     submitAnswer(session.sessionId, 'intro', null);
 
     publishV2();
 
-    // The step the user is on came from v1 and must still resolve and advance.
+    // Текущий шаг пришёл из v1 и обязан по-прежнему разрешаться и двигать дальше.
     const view = buildView(getSession(session.sessionId)!);
     expect(view.version).toBe(1);
     expect(view.currentStep).toBe('team_size');
@@ -51,15 +47,14 @@ describe('version pinning', () => {
   });
 
   it('serves the old session its own config, not the new one', () => {
-    // v2 adds `meeting_load` to variant A only, so pin the variant to keep the
-    // comparison about the version rather than about assignment.
+    // v2 добавляет `meeting_load` только варианту A — фиксируем вариант, чтобы сравнивать версии, а не назначение.
     const session = createSession({ funnelKey: FUNNEL, variantOverride: 'A' });
     publishV2();
 
     const old = buildView(getSession(session.sessionId)!);
     const fresh = createSession({ funnelKey: FUNNEL, variantOverride: 'A' });
 
-    // meeting_load only exists from v2 onwards.
+    // meeting_load существует только начиная с v2.
     expect(old.funnel.steps.some((s) => s.id === 'meeting_load')).toBe(false);
     expect(fresh.funnel.steps.some((s) => s.id === 'meeting_load')).toBe(true);
   });
@@ -72,7 +67,7 @@ describe('version pinning', () => {
     rollbackToPrevious(FUNNEL);
     expect(getActiveVersionRow(FUNNEL)!.version).toBe(1);
 
-    // Documented policy: a live session never migrates across configs.
+    // Заявленная политика: живая сессия никогда не переезжает между конфигами.
     const resumed = buildView(getSession(onV2.sessionId)!);
     expect(resumed.version).toBe(2);
     expect(submitAnswer(onV2.sessionId, resumed.currentStep!, null).ok).toBe(true);
@@ -86,7 +81,7 @@ describe('version pinning', () => {
     rollbackToPrevious(FUNNEL);
     const v1After = listVersions(FUNNEL).find((v) => v.version === 1);
 
-    // isActive flips, so compare the immutable identity fields.
+    // isActive меняется, поэтому сравниваем неизменяемые поля идентичности.
     const before = JSON.parse(v1Before);
     expect(v1After!.id).toBe(before.id);
     expect(v1After!.createdAt).toBe(before.createdAt);

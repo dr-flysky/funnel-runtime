@@ -1,10 +1,8 @@
 /**
- * Requirement 7.1: "расчёт основных аналитических показателей", and section 5's
- * demand that the numbers survive repeat views, Back, duplicates and events
- * that arrive out of order.
+ * Расчёт основных показателей: цифры должны переживать повторные просмотры,
+ * «назад», дубли и события, пришедшие не по порядку.
  *
- * Every case here builds a hand-countable scenario so the expected values are
- * obvious by inspection rather than by trusting the implementation.
+ * Каждый сценарий подобран так, чтобы ожидаемые значения считались руками.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FUNNEL, makeEvent, publishV2, seedV1, useFreshDb } from './helpers.ts';
@@ -20,7 +18,7 @@ function newSession(variant?: 'A' | 'B', campaign?: string) {
   });
 }
 
-/** Walk a session through the given steps, emitting the usual event trio. */
+/** Проводит сессию по заданным шагам, отправляя обычную тройку событий. */
 function walk(
   sessionId: string,
   steps: string[],
@@ -52,7 +50,7 @@ describe('analytics aggregation', () => {
 
   it('counts unique sessions, not events', () => {
     const s = newSession();
-    // The same step viewed five times is still one session on that step.
+    // Пять просмотров одного шага — всё равно одна сессия на нём.
     ingestEvents([
       makeEvent(s.sessionId, 'session_started'),
       ...Array.from({ length: 5 }, (_, i) =>
@@ -100,7 +98,7 @@ describe('analytics aggregation', () => {
     const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
     const a = report.byVariant;
 
-    // Both sessions did identical things; totals must be exactly double.
+    // Обе сессии сделали одно и то же: итоги должны ровно удвоиться.
     expect(report.overall.startedSessions).toBe(2);
     expect(report.overall.resultSessions).toBe(2);
     const teamSize = report.overall.steps.find((x) => x.stepId === 'team_size')!;
@@ -110,7 +108,7 @@ describe('analytics aggregation', () => {
   });
 
   it('computes drop-off as reached minus completed', () => {
-    // 3 sessions see `priorities`; only 1 gets past it.
+    // `priorities` видят 3 сессии, проходит дальше только 1.
     const a = newSession();
     const b = newSession();
     const c = newSession();
@@ -165,7 +163,7 @@ describe('analytics aggregation', () => {
     const notClicked = newSession();
 
     walk(clicked.sessionId, ['team_size'], { complete: true });
-    // Clicking twice must not double-count.
+    // Двойной клик не должен считаться дважды.
     ingestEvents([
       makeEvent(clicked.sessionId, 'cta_clicked', {
         step_id: 'result',
@@ -286,7 +284,7 @@ describe('analytics aggregation', () => {
     walk(b.sessionId, ['team_size'], { complete: true, resultId: 'async_native' });
     walk(c.sessionId, ['team_size'], { complete: true, resultId: 'office_core' });
 
-    // A refresh of the result screen must not inflate the share.
+    // Обновление экрана результата не должно раздувать долю.
     ingestEvents([
       makeEvent(a.sessionId, 'result_viewed', {
         step_id: 'result',
@@ -321,10 +319,7 @@ describe('analytics aggregation', () => {
     expect(report.dataQuality.allTime.duplicatesSuppressed).toBe(3);
   });
 
-  /**
-   * The split exists because these two groups behave differently under a
-   * filter. Asserting that keeps anyone from "tidying" them back together.
-   */
+  /** Группы разделены, потому что по-разному ведут себя под фильтром; проверка не даёт их «прибрать» обратно. */
   it('narrows scoped counters under a filter but not the all-time ones', () => {
     const kept = newSession('A', 'keep');
     const other = newSession('A', 'drop');
@@ -341,8 +336,7 @@ describe('analytics aggregation', () => {
     expect(one.dataQuality.scoped.distinctSessions).toBeLessThan(
       all.dataQuality.scoped.distinctSessions,
     );
-    // A suppressed duplicate never became a row, so it cannot be attributed to
-    // a campaign — the all-time tally is identical under both.
+    // Подавленный дубль не стал строкой, отнести его к кампании нельзя — общий счётчик одинаков.
     expect(one.dataQuality.allTime.duplicatesSuppressed).toBe(
       all.dataQuality.allTime.duplicatesSuppressed,
     );

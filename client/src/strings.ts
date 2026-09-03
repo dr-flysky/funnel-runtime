@@ -1,21 +1,9 @@
 /**
- * UI chrome, in one place.
+ * Текст интерфейса приложения: навигация, кнопки, заголовки таблиц, дашборд.
  *
- * Scope is deliberate: this covers only text the *application* owns — nav,
- * buttons, table headers, dashboard copy. It does **not** cover the funnel
- * itself. Step titles, option labels, helper text, validation messages, result
- * copy and the CTA label all come from the published config, because the whole
- * point of the runtime is that the frontend renders whatever JSON it is handed.
- * Translating the funnel means publishing a translated config, not editing
- * this file.
- *
- * A few strings here are fallbacks used only when the config omits an optional
- * field (`primaryActionLabel`, `errorTitle`, `retryLabel`); the config's own
- * wording always wins.
- *
- * Kept as a flat frozen object rather than an i18n library: one locale is in
- * play, and a dependency would buy nothing the brief asks for. Swapping to a
- * second locale later means keying this object by `funnel.locale`.
+ * Здесь НЕТ текстов самой воронки — заголовки шагов, подписи опций, сообщения
+ * валидации, тексты результатов и CTA приходят из опубликованного конфига.
+ * Перевести воронку — значит опубликовать переведённый конфиг, а не править этот файл.
  */
 export const t = {
   nav: {
@@ -47,7 +35,7 @@ export const t = {
     progress: (position: number, total: number) => `Вопрос ${position} из ${total}`,
     footnote:
       'Ответы сохраняются на сервере — обновите страницу или закройте вкладку, и вы продолжите с того же места.',
-    /** Used only if the step's config omits `primaryActionLabel`. */
+    /** Запасной вариант, если конфиг шага не задал `primaryActionLabel`. */
     continueFallback: 'Продолжить',
     helpShow: 'Что это значит?',
     helpHide: 'Скрыть пояснение',
@@ -64,7 +52,7 @@ export const t = {
     badge: 'Ваша рекомендация',
     whatNext: 'Что делать дальше',
     restart: 'Пройти заново',
-    /** Used only if the result step's config omits these. */
+    /** Запасной вариант, если конфиг экрана результата их не задал. */
     failedTitle: 'Не удалось собрать рекомендацию',
     retry: 'Попробовать снова',
   },

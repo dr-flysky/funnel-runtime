@@ -1,7 +1,4 @@
-/* ---------------------------------------------------------------------------
-   Funnel Runtime — one small design system, three surfaces.
-   Light and dark are both first-class; every colour is a token.
---------------------------------------------------------------------------- */
+/* Небольшая дизайн-система на три экрана; светлая и тёмная темы равноправны, каждый цвет — токен. */
 
 :root {
   --bg: #f6f7f9;
@@ -170,8 +167,6 @@ h3 { font-size: 0.95rem; margin: 0 0 0.35rem; }
 .subtitle { color: var(--text-muted); margin: 0 0 1.25rem; }
 .body { margin: 0 0 1rem; }
 
-.bullets { margin: 0 0 1.25rem; padding-left: 1.1rem; color: var(--text-muted); }
-.bullets li { margin-bottom: 0.3rem; }
 
 /* ---- inputs ------------------------------------------------------------- */
 
@@ -203,7 +198,6 @@ h3 { font-size: 0.95rem; margin: 0 0 0.35rem; }
 }
 
 .option-label { font-weight: 500; }
-.option-hint { font-size: 0.85rem; color: var(--text-muted); }
 
 .option-mark {
   position: absolute;

@@ -1,7 +1,4 @@
-/**
- * Requirement 7.1: "публикация и откат версии" — publishing without a redeploy,
- * rolling back, and refusing to activate a config that would strand traffic.
- */
+/** Публикация и откат версии без редеплоя, включая отказ активировать конфиг, который бросит трафик. */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FUNNEL, loadConfig, makeV2, seedV1, useFreshDb, publishV2 } from './helpers.ts';
 import {
@@ -78,7 +75,7 @@ describe('publish and rollback', () => {
     broken.experiment.variants.A.stepSequence.push('step_that_does_not_exist');
 
     expect(() => publishVersion(broken)).toThrow(ConfigValidationError);
-    // Nothing was published, so the active pointer is untouched.
+    // Ничего не опубликовано, значит активный указатель не сдвинулся.
     expect(listVersions(FUNNEL)).toHaveLength(1);
     expect(getActiveVersionRow(FUNNEL)!.version).toBe(1);
   });
@@ -100,8 +97,7 @@ describe('publish and rollback', () => {
   });
 
   it('accepts a variant that drops a step by omitting it from its sequence', () => {
-    // This is how iteration 2 removes a screen for one variant. It cannot
-    // strand anyone: the sequence is linear, so the next step simply follows.
+    // Так итерация 2 убирает экран у одного варианта; тупика не будет — последовательность линейна.
     const summary = publishVersion(makeV2(), { note: 'v2' });
     expect(summary.version).toBe(2);
     expect(getActiveVersionRow(FUNNEL)!.version).toBe(2);

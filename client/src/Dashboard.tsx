@@ -1,61 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api } from './api';
+import { api, type AnalyticsReport } from './api';
 import { t } from './strings';
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
-interface StepMetrics {
-  stepId: string;
-  title: string;
-  reached: number;
-  completed: number;
-  dropOff: number;
-  completionRate: number;
-  dropOffRate: number;
-  reachFromStart: number;
-  backs: number;
-  viewsPerSession: number;
-}
-
-interface Segment {
-  label: string;
-  version?: number;
-  variant?: string;
-  startedSessions: number;
-  resultSessions: number;
-  ctaSessions: number;
-  ctaClickRate: number;
-  resultRate: number;
-  ctaCtrOnResult: number;
-  steps: StepMetrics[];
-}
-
-interface Report {
-  funnelKey: string;
-  overall: Segment;
-  byVariant: Segment[];
-  byVersion: Segment[];
-  customEvents: { type: string; events: number; sessions: number }[];
-  dataQuality: {
-    scoped: Record<string, number>;
-    allTime: Record<string, number>;
-  };
-  campaigns: string[];
-  versions: number[];
-  variants: string[];
-  experiment: { id: string; variants: string[]; assignment: string } | null;
-  results: {
-    resultId: string;
-    title: string;
-    sessions: number;
-    share: number;
-    ctaSessions: number;
-    ctaRate: number;
-  }[];
-}
-
 export default function Dashboard({ funnelKey }: { funnelKey: string }) {
-  const [report, setReport] = useState<Report | null>(null);
+  const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [campaign, setCampaign] = useState('');
   const [version, setVersion] = useState('');
   const [includeSynthetic, setIncludeSynthetic] = useState(true);
@@ -338,28 +288,27 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
         </p>
 
         <h3 className="quality-head">{t.dashboard.quality.scopedHeading}</h3>
-        <div className="quality">
-          {Object.entries(report.dataQuality.scoped).map(([k, v]) => (
-            <div key={k} className="quality-item">
-              <span className="quality-value">{v}</span>
-              <span className="quality-label">{t.dashboard.quality.labels[k] ?? k}</span>
-            </div>
-          ))}
-        </div>
+        <QualityGrid metrics={report.dataQuality.scoped} />
 
         <h3 className="quality-head">{t.dashboard.quality.allTimeHeading}</h3>
         <p className="muted small">
           {t.dashboard.quality.allTimeNote}
         </p>
-        <div className="quality">
-          {Object.entries(report.dataQuality.allTime).map(([k, v]) => (
-            <div key={k} className="quality-item">
-              <span className="quality-value">{v}</span>
-              <span className="quality-label">{t.dashboard.quality.labels[k] ?? k}</span>
-            </div>
-          ))}
-        </div>
+        <QualityGrid metrics={report.dataQuality.allTime} />
       </section>
+    </div>
+  );
+}
+
+function QualityGrid({ metrics }: { metrics: Record<string, number> }) {
+  return (
+    <div className="quality">
+      {Object.entries(metrics).map(([k, v]) => (
+        <div key={k} className="quality-item">
+          <span className="quality-value">{v}</span>
+          <span className="quality-label">{t.dashboard.quality.labels[k] ?? k}</span>
+        </div>
+      ))}
     </div>
   );
 }

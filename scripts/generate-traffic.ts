@@ -1,23 +1,16 @@
 /**
- * Synthetic traffic generator.
+ * Генератор синтетического трафика.
  *
- * Boots the real HTTP app on an ephemeral port and drives it the way a browser
- * would, so the batch endpoint, the validation path and the navigation rules
- * are all genuinely exercised — not bypassed by writing rows directly.
+ * Поднимает настоящее HTTP-приложение на случайном порту и ходит по нему как браузер,
+ * поэтому батчевый эндпоинт, валидация и правила навигации реально задействованы,
+ * а не обойдены прямой записью в таблицы.
  *
- * It deliberately produces the messy traffic the brief asks for:
- *   - both variants and several UTM campaigns
- *   - every branch, including the hidden office_days step and all four results
- *   - drop-off spread across different steps
- *   - repeated step views after Back
- *   - whole batches resent after a simulated timeout
- *   - events that arrive out of order
- *   - a few malformed events mixed into otherwise-valid batches
+ * Специально делает «грязный» трафик: оба варианта и несколько кампаний, все ветки
+ * и результаты, отвалы на разных шагах, повторные просмотры после «назад»,
+ * перепосланные после таймаута батчи, события не по порядку и битые события внутри
+ * нормальных батчей. Свойства событий — ровно те, что объявлены в конфиге.
  *
- * Events carry exactly the properties the config declares for them, so the
- * generated data matches what the real client emits.
- *
- * Usage: npm run generate:traffic -- [sessions] [--seed=42] [--funnel=id]
+ * Запуск: npm run generate:traffic -- [sessions] [--seed=42] [--funnel=id]
  */
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
@@ -26,10 +19,7 @@ import { getDb } from '../server/db.ts';
 import { getActiveVersionRow } from '../server/versions.ts';
 import type { ResolvedFunnel, StepDef } from '@shared/funnel';
 
-// ---------------------------------------------------------------------------
-// Deterministic randomness — same seed, same traffic.
-// ---------------------------------------------------------------------------
-
+/** Детерминированный ГПСЧ: одинаковый seed — одинаковый трафик. */
 function mulberry32(seed: number) {
   let a = seed >>> 0;
   return () => {
@@ -63,10 +53,6 @@ const CAMPAIGNS = [
   { utm_source: 'reddit', utm_medium: 'paid_social', utm_campaign: 'r_managers', utm_content: 'video_15s' },
   { utm_source: 'organic', utm_medium: 'referral', utm_campaign: 'comparison_site', utm_content: 'listing' },
 ];
-
-// ---------------------------------------------------------------------------
-// Event buffer
-// ---------------------------------------------------------------------------
 
 interface QueuedEvent {
   event_id: string;
@@ -104,15 +90,7 @@ class SessionBuffer {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Answer synthesis
-// ---------------------------------------------------------------------------
-
-/**
- * Pick a plausible answer. `work_mode` is skewed so all three branches — and
- * therefore the hidden office_days step and every result rule — get real
- * traffic rather than a rounding error.
- */
+/** Правдоподобный ответ; числа смещены так, чтобы все ветки и результаты получили трафик. */
 function synthesiseAnswer(step: StepDef): unknown {
   switch (step.type) {
     case 'info':
@@ -137,7 +115,7 @@ function synthesiseAnswer(step: StepDef): unknown {
     case 'number': {
       const min = step.input?.min ?? 0;
       const max = step.input?.max ?? min + 100;
-      // Cluster toward realistic small teams / low office days.
+      // Смещение к небольшим командам и малому числу офисных дней.
       const skewed = chance(0.65) ? min + (max - min) * rnd() * 0.35 : min + rnd() * (max - min);
       const increment = step.input?.step ?? 1;
       const value = Math.round(skewed / increment) * increment;
@@ -149,16 +127,12 @@ function synthesiseAnswer(step: StepDef): unknown {
   }
 }
 
-/** Later steps are stickier; free numeric entry bleeds the most users. */
+/** Чем дальше шаг, тем реже уходят; сильнее всего теряет свободный ввод числа. */
 function dropOffProbability(step: StepDef, depth: number): number {
   const base = step.type === 'number' ? 0.14 : step.type === 'multi-select' ? 0.1 : 0.07;
   const fatigue = Math.max(0, 0.05 - depth * 0.005);
   return Math.min(0.4, base + fatigue);
 }
-
-// ---------------------------------------------------------------------------
-// HTTP helper
-// ---------------------------------------------------------------------------
 
 async function postJson(base: string, path: string, body: unknown): Promise<any> {
   const res = await fetch(base + path, {
@@ -172,10 +146,6 @@ async function postJson(base: string, path: string, body: unknown): Promise<any>
   return { status: res.status, ...json };
 }
 
-// ---------------------------------------------------------------------------
-// One simulated visitor
-// ---------------------------------------------------------------------------
-
 interface Stats {
   sessions: number;
   completed: number;
@@ -188,6 +158,7 @@ interface Stats {
   results: Record<string, number>;
 }
 
+/** Один смоделированный посетитель. */
 async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]): Promise<void> {
   const utm = pick(CAMPAIGNS);
   const created = await postJson(base, '/api/session', {
@@ -220,7 +191,7 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
       stats.results[resultId] = (stats.results[resultId] ?? 0) + 1;
 
       buf.emit('result_viewed', step.id, { result_id: resultId });
-      // A refresh of the result screen must not double-count anything.
+      // Обновление экрана результата не должно ничего задваивать.
       if (chance(0.25)) buf.emit('result_viewed', step.id, { result_id: resultId });
       if (chance(0.42)) {
         stats.ctaClicks += 1;
@@ -238,9 +209,8 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
       visible_step_count: view.progress.visibleCount,
     });
 
-    // Inline help, on the same two conditions the client applies: the step
-    // supplies help copy, and this session's version declares the event. On a
-    // version that declares neither, nothing here fires.
+    // Подсказка — на тех же двух условиях, что и в клиенте: у шага есть текст
+    // и версия сессии объявила событие.
     if (step.content?.body && funnel.allowedEvents?.includes('help_opened') && chance(0.2)) {
       stats.helpOpens += 1;
       buf.emit('help_opened', step.id, { surface: 'inline' });
@@ -252,8 +222,7 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
       return;
     }
 
-    // Some users step back, re-read the previous screen, then come forward
-    // again — this is what produces repeat step_viewed events.
+    // Часть пользователей возвращается на шаг назад и идёт вперёд снова — отсюда повторные step_viewed.
     if (view.canGoBack && chance(0.18)) {
       const back = await postJson(base, `/api/session/${created.sessionId}/back`, {});
       if (back.currentStep) {
@@ -285,10 +254,6 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
   allEvents.push(buf.events);
 }
 
-// ---------------------------------------------------------------------------
-// Delivery: batching, reordering, retries, bad payloads
-// ---------------------------------------------------------------------------
-
 interface Delivery {
   batchesSent: number;
   eventsSent: number;
@@ -298,12 +263,13 @@ interface Delivery {
   reordered: number;
 }
 
+/** Доставка: батчи, перестановки, ретраи и битые payload'ы. */
 async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Delivery> {
   const stats: Delivery = {
     batchesSent: 0, eventsSent: 0, accepted: 0, duplicates: 0, rejected: 0, reordered: 0,
   };
 
-  // Interleave sessions the way concurrent users would arrive.
+  // Перемешиваем сессии так, как они приходили бы от одновременных пользователей.
   const queue: QueuedEvent[] = [];
   const cursors = perSession.map((events) => ({ events, i: 0 }));
   while (cursors.some((c) => c.i < c.events.length)) {
@@ -317,7 +283,7 @@ async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Deliv
     }
   }
 
-  // Swap adjacent pairs so a slice of traffic genuinely arrives out of order.
+  // Меняем местами соседние пары, чтобы часть трафика действительно пришла не по порядку.
   for (let i = 1; i < queue.length; i += 1) {
     if (chance(0.06)) {
       [queue[i - 1], queue[i]] = [queue[i], queue[i - 1]];
@@ -338,7 +304,7 @@ async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Deliv
   for (let i = 0; i < queue.length; i += BATCH) {
     const batch: unknown[] = queue.slice(i, i + BATCH);
 
-    // A malformed event must not take its siblings down with it.
+    // Битое событие не должно утянуть за собой соседей по батчу.
     if (chance(0.12)) {
       batch.splice(Math.floor(rnd() * batch.length), 0, {
         event_id: randomUUID(),
@@ -352,14 +318,12 @@ async function deliver(base: string, perSession: QueuedEvent[][]): Promise<Deliv
 
     await send(batch);
 
-    // Simulated timeout: the client never saw our 200 and retries the batch.
+    // Имитация таймаута: клиент не увидел наш 200 и шлёт батч ещё раз.
     if (chance(0.15)) await send(batch);
   }
 
   return stats;
 }
-
-// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   getDb();

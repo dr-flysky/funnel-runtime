@@ -6,13 +6,11 @@ import { api } from './api';
 import { t } from './strings';
 
 /**
- * Three surfaces, one bundle. A dependency-free router keeps the client small;
- * the server serves index.html for any non-/api path so deep links work.
+ * Три экрана в одном бандле, роутер без зависимостей: сервер отдаёт index.html
+ * на любой путь вне /api, поэтому глубокие ссылки работают.
  *
- * The funnel key is never hardcoded here. `?funnel=` wins if present, otherwise
- * we ask the server what is published — so the default lives in exactly one
- * place (DEFAULT_FUNNEL_KEY on the server) and swapping in a different config
- * needs no client change.
+ * Ключ воронки не зашит: выигрывает `?funnel=`, иначе спрашиваем сервер, что
+ * опубликовано, — значение по умолчанию живёт только в DEFAULT_FUNNEL_KEY.
  */
 export default function App() {
   const [path, setPath] = useState(window.location.pathname);

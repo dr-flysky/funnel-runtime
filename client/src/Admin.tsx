@@ -1,18 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, ApiError, type VersionSummary } from './api';
+import { api, ApiError, type ActivationRow, type VersionSummary } from './api';
 import { t } from './strings';
-
-interface Activation {
-  id: number;
-  version: number;
-  action: string;
-  note: string | null;
-  created_at: string;
-}
 
 export default function Admin({ funnelKey }: { funnelKey: string }) {
   const [versions, setVersions] = useState<VersionSummary[]>([]);
-  const [activations, setActivations] = useState<Activation[]>([]);
+  const [activations, setActivations] = useState<ActivationRow[]>([]);
   const [files, setFiles] = useState<
     { file: string; key: string | null; steps: number; sourceVersion: number | null }[]
   >([]);
@@ -32,6 +24,7 @@ export default function Admin({ funnelKey }: { funnelKey: string }) {
     refresh().catch((e) => setMessage({ kind: 'err', text: String(e) }));
   }, [refresh]);
 
+  /** Общая обёртка для действий админки: показать результат и перечитать состояние. */
   const run = async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true);
     setMessage(null);

@@ -1,14 +1,8 @@
 /**
- * Session lifecycle.
+ * Жизненный цикл сессии.
  *
- * The server is authoritative for navigation: it validates every answer and
- * decides the next step. The client renders what it is told. That is what makes
- * back / refresh / reopen safe — the browser holds nothing but a session id.
- *
- * Navigation follows the config's own model: the variant's `stepSequence`
- * filtered by each step's `visibleWhen`. Because the visible path is recomputed
- * from the current answers on every request, changing an earlier answer takes
- * effect immediately — a step can appear or disappear without any bookkeeping.
+ * За навигацию отвечает сервер: он валидирует ответ и решает, какой шаг следующий,
+ * а браузер хранит только id сессии — поэтому «назад», обновление и переоткрытие безопасны.
  */
 import { randomUUID } from 'node:crypto';
 import { getDb, nowIso } from './db.ts';
@@ -73,16 +67,16 @@ export interface SessionView {
   variant: string;
   variantSource: string;
   experimentId: string;
-  /** Config already resolved for this session's variant. */
+  /** Конфиг, уже разрешённый под вариант этой сессии. */
   funnel: ResolvedFunnel;
-  /** Ids of the steps this user will see, given their answers so far. */
+  /** Шаги, которые пользователь увидит при текущих ответах. */
   visibleStepIds: string[];
   currentStep: string | null;
   currentStepType: string | null;
   canGoBack: boolean;
   completed: boolean;
   progress: Progress;
-  /** The user's own answers, returned so the UI can repopulate its inputs. */
+  /** Ответы пользователя — чтобы UI мог восстановить поля ввода. */
   answers: Answers;
   resultId: string | null;
   result: ResultDef | null;
@@ -123,18 +117,14 @@ export function getAnswers(sessionId: string): Answers {
   return answers;
 }
 
-/** The exact config this session started on, resolved for its variant. */
+/** Тот самый конфиг, на котором сессия стартовала, разрешённый под её вариант. */
 export function funnelForSession(session: SessionRow): ResolvedFunnel {
   const row = getVersionById(session.version_id);
   if (!row) throw new Error(`Session ${session.session_id} references a missing version.`);
   return resolveVariant(parseConfig(row), session.variant);
 }
 
-/**
- * `session.ttlHours` from the config. A session past its TTL is treated as
- * gone rather than silently resumed, so a stale link starts cleanly on the
- * currently active version.
- */
+/** TTL берётся из `session.ttlHours` конфига; протухшая сессия считается исчезнувшей, а не продолжается. */
 export function sessionExpiry(session: SessionRow, funnel: ResolvedFunnel): Date | null {
   const hours = funnel.session?.ttlHours;
   if (!hours || hours <= 0) return null;
@@ -175,8 +165,7 @@ export function buildView(session: SessionRow): SessionView {
   const step = currentStep ? stepById(funnel, currentStep) : undefined;
   const completed = state ? state.completed === 1 : false;
 
-  // The result is derived from the answers, never stored as the source of
-  // truth, so it stays consistent if an answer is edited on the way back.
+  // Результат выводится из ответов, а не хранится как источник истины: правка ответа на «назад» его пересчитает.
   const onResultScreen = step?.type === 'result' || completed;
   const resultId = onResultScreen ? resolveResultId(funnel, answers) : null;
 
@@ -211,11 +200,7 @@ export function buildView(session: SessionRow): SessionView {
 
 export class NoActiveVersionError extends Error {}
 
-/**
- * Start a session on the currently active version, pinning both the version and
- * the variant onto the session row. This is the only place the active pointer
- * is read for a user-facing session.
- */
+/** Создаёт сессию на активной версии, фиксируя в её строке и версию, и вариант. */
 export function createSession(opts: {
   funnelKey: string;
   utm?: Utm;
@@ -265,22 +250,20 @@ export interface AdvanceResult {
   ok: boolean;
   error?: string;
   view?: SessionView;
-  /** Sanitised metadata for the `answer_submitted` event: the kind, nothing more. */
+  /** Обезличенные данные для события `answer_submitted`. */
   answerSummary?: Record<string, unknown>;
-  /** For the `step_completed` event. */
+  /** Для события `step_completed`. */
   nextStepId?: string | null;
-  /** For the `back_clicked` event. */
+  /** Для события `back_clicked`. */
   destinationStepId?: string | null;
   reachedResult?: boolean;
 }
 
 /**
- * Validate an answer, persist it, and advance to the next visible step.
+ * Валидирует ответ, сохраняет его и переходит к следующему видимому шагу.
  *
- * Submitting a step other than the current one is rejected, so a stale tab
- * cannot corrupt the path. Re-submitting the current step is an edit: the
- * answer is overwritten and the visible path recomputed, which may reveal or
- * hide steps further along.
+ * Ответ не на текущий шаг отклоняется, чтобы старая вкладка не портила путь.
+ * Повторная отправка текущего шага — это правка: путь пересчитывается заново.
  */
 export function submitAnswer(sessionId: string, stepId: string, value: unknown): AdvanceResult {
   const session = getSession(sessionId);
@@ -303,7 +286,7 @@ export function submitAnswer(sessionId: string, stepId: string, value: unknown):
   const validation = validateAnswer(step, value);
   if (!validation.ok) return { ok: false, error: validation.error };
 
-  // Info screens carry no answer, so nothing is written for them.
+  // Информационные экраны ответа не несут, для них ничего не пишем.
   if (step.type !== 'info') {
     const stored = validation.value ?? null;
     getDb()
@@ -319,11 +302,10 @@ export function submitAnswer(sessionId: string, stepId: string, value: unknown):
   const answers = getAnswers(sessionId);
   const next = nextStepId(funnel, stepId, answers);
   const nextStep = next ? stepById(funnel, next) : undefined;
+  // next === null возможен лишь у варианта без экрана результата — валидация такое запрещает.
   const reachedResult = nextStep?.type === 'result' || next === null;
   const resultId = reachedResult ? resolveResultId(funnel, answers) : null;
 
-  // Reaching the result screen is completion; `next === null` only happens if a
-  // variant ends without one, which config validation already refuses.
   saveState(sessionId, next, reachedResult, resultId);
 
   return {
@@ -335,13 +317,7 @@ export function submitAnswer(sessionId: string, stepId: string, value: unknown):
   };
 }
 
-/**
- * Step back one screen.
- *
- * The previous step is computed from the visible path rather than from a stored
- * history stack: with a linear sequence plus visibility predicates the backward
- * edge is unambiguous, so there is no history to keep in sync.
- */
+/** Шаг назад. Обратное ребро однозначно выводится из видимого пути, поэтому история не хранится. */
 export function goBack(sessionId: string): AdvanceResult {
   const session = getSession(sessionId);
   if (!session) return { ok: false, error: 'Unknown session.' };
@@ -353,7 +329,7 @@ export function goBack(sessionId: string): AdvanceResult {
   const state = getState(sessionId);
   const currentStep = state?.current_step;
 
-  // From the result screen, Back returns to the last visible question.
+  // С экрана результата «назад» возвращает к последнему видимому вопросу.
   const visible = visibleSteps(funnel, answers);
   const target = currentStep
     ? previousStepId(funnel, currentStep, answers)

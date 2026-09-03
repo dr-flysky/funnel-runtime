@@ -1,10 +1,9 @@
 /**
- * Client-side event tracker.
+ * Клиентский трекер событий.
  *
- * The server guarantees idempotency, which lets the client be simple and
- * aggressive: it mints the `event_id` up front, keeps unsent events in
- * localStorage, and retries whole batches without needing to know whether the
- * previous attempt landed. A retry that succeeds twice costs nothing.
+ * Идемпотентность на сервере позволяет клиенту быть простым: он сам выдаёт
+ * `event_id`, держит неотправленное в localStorage и повторяет батч целиком,
+ * не выясняя, дошла ли прошлая попытка.
  */
 
 const QUEUE_KEY = 'funnel_runtime.event_queue.v1';
@@ -39,7 +38,7 @@ function writeQueue(events: TrackedEvent[]): void {
   try {
     localStorage.setItem(QUEUE_KEY, JSON.stringify(events.slice(-500)));
   } catch {
-    // Storage full or blocked: tracking must never break the funnel.
+    // Хранилище переполнено или заблокировано: трекинг не вправе ломать воронку.
   }
 }
 
@@ -51,7 +50,7 @@ class Tracker {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // A page the user is leaving still owes us its events.
+      // Страница, которую покидают, всё ещё должна нам свои события.
       window.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') this.flushBeacon();
       });
@@ -85,11 +84,7 @@ class Tracker {
     this.timer = window.setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
   }
 
-  /**
-   * Send the head of the queue. Events are only dropped once the server has
-   * confirmed a verdict for them — accepted, duplicate or rejected are all
-   * terminal. A network failure leaves them queued for the next tick.
-   */
+  /** Событие выбрасывается из очереди только после вердикта сервера; сбой сети оставляет его до следующего тика. */
   async flush(): Promise<void> {
     if (this.inFlight || this.queue.length === 0) return;
     this.inFlight = true;
@@ -101,32 +96,30 @@ class Tracker {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ events: batch }),
       });
-      if (res.ok) {
-        const sent = new Set(batch.map((e) => e.event_id));
-        this.queue = this.queue.filter((e) => !sent.has(e.event_id));
-        writeQueue(this.queue);
-      }
+      if (res.ok) this.drop(batch);
     } catch {
-      // Offline or server down: keep them and try again on the next tick.
+      // Офлайн или сервер недоступен: оставляем очередь и пробуем на следующем тике.
     } finally {
       this.inFlight = false;
     }
   }
 
-  /** Best-effort delivery during page unload, when fetch may be cancelled. */
+  /** Досылка при выгрузке страницы, когда fetch уже могут отменить. */
   private flushBeacon(): void {
     if (this.queue.length === 0) return;
     const batch = this.queue.slice(0, MAX_BATCH);
     try {
       const blob = new Blob([JSON.stringify({ events: batch })], { type: 'application/json' });
-      if (navigator.sendBeacon('/api/events', blob)) {
-        const sent = new Set(batch.map((e) => e.event_id));
-        this.queue = this.queue.filter((e) => !sent.has(e.event_id));
-        writeQueue(this.queue);
-      }
+      if (navigator.sendBeacon('/api/events', blob)) this.drop(batch);
     } catch {
-      // Nothing more we can do here; the queue survives in localStorage.
+      // Больше сделать нечего: очередь переживёт перезагрузку в localStorage.
     }
+  }
+
+  private drop(batch: TrackedEvent[]): void {
+    const sent = new Set(batch.map((e) => e.event_id));
+    this.queue = this.queue.filter((e) => !sent.has(e.event_id));
+    writeQueue(this.queue);
   }
 
   get pending(): number {

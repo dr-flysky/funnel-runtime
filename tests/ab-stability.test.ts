@@ -1,7 +1,4 @@
-/**
- * Requirement 7.1: "стабильность A/B-варианта" — assignment happens on the
- * server, survives refresh, and only moves when the documented override says so.
- */
+/** Стабильность A/B-варианта: назначение на сервере, переживает обновление и меняется только по override. */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FUNNEL, publishV2, seedV1, useFreshDb, loadConfig } from './helpers.ts';
 import { buildView, createSession, getSession } from '../server/sessions.ts';
@@ -51,7 +48,7 @@ describe('A/B assignment', () => {
     for (let i = 0; i < 400; i += 1) {
       counts[createSession({ funnelKey: FUNNEL }).variant] += 1;
     }
-    // Equal weights: allow a generous band, we are testing "not degenerate".
+    // Веса равные; полоса широкая — проверяем «не вырождено», а не точность.
     expect(counts.A).toBeGreaterThan(140);
     expect(counts.B).toBeGreaterThan(140);
     expect(counts.A + counts.B).toBe(400);
@@ -61,10 +58,10 @@ describe('A/B assignment', () => {
     const a = createSession({ funnelKey: FUNNEL, variantOverride: 'A' });
     const b = createSession({ funnelKey: FUNNEL, variantOverride: 'B' });
 
-    // A asks team size first; B leads with work mode.
+    // A сначала спрашивает размер команды, B начинает с формата работы.
     expect(a.funnel.steps[1].id).toBe('team_size');
     expect(b.funnel.steps[1].id).toBe('work_mode');
-    // B also reframes the intro copy.
+    // B ещё и переформулирует интро.
     expect(b.funnel.steps[0].content.title).toBe('How should your team really work?');
   });
 
@@ -74,7 +71,7 @@ describe('A/B assignment', () => {
 
     const resumed = buildView(getSession(session.sessionId)!);
     expect(resumed.variant).toBe('B');
-    // v2 drops `tool_count` for B; the v1 session must still have it.
+    // v2 убирает `tool_count` у B; сессия на v1 обязана его сохранить.
     expect(resumed.funnel.steps.some((s) => s.id === 'tool_count')).toBe(true);
   });
 

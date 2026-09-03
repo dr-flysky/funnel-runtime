@@ -1,42 +1,15 @@
-import type { Answers, Progress, ResolvedFunnel, ResultDef } from '@shared/funnel';
+// Типы ответов берутся из серверных модулей: это `import type`, он стирается при
+// сборке, поэтому серверный код в бандл не попадает, а формы не расходятся.
+import type { SessionView as ServerSessionView } from '@server/sessions';
+import type { ActivationRow, VersionSummary } from '@server/versions';
+import type { AnalyticsReport } from '@server/analytics';
 
-export interface SessionView {
-  sessionId: string;
-  funnelId: string;
-  version: number;
-  versionId: number;
-  variant: string;
-  variantSource: string;
-  experimentId: string;
-  funnel: ResolvedFunnel;
-  visibleStepIds: string[];
-  currentStep: string | null;
-  currentStepType: string | null;
-  canGoBack: boolean;
-  completed: boolean;
-  progress: Progress;
-  answers: Answers;
-  resultId: string | null;
-  result: ResultDef | null;
-  utm: Record<string, string | null>;
-  expiresAt: string | null;
+export type { ActivationRow, AnalyticsReport, VersionSummary };
+
+/** Ответ на запись: вид сессии плюс поля, которые сервер добавляет только к нему. */
+export interface SessionView extends ServerSessionView {
   answerSummary?: Record<string, unknown>;
   reachedResult?: boolean;
-}
-
-export interface VersionSummary {
-  id: number;
-  funnelKey: string;
-  version: number;
-  sourceVersion: number | null;
-  name: string;
-  note: string | null;
-  createdAt: string;
-  isActive: boolean;
-  stepCount: number;
-  resultCount: number;
-  variants: string[];
-  experimentId: string;
 }
 
 export class ApiError extends Error {
@@ -80,17 +53,9 @@ export const api = {
     ),
 
   versions: (funnelKey: string) =>
-    request<{
-      funnelKey: string;
-      versions: VersionSummary[];
-      activations: {
-        id: number;
-        version: number;
-        action: string;
-        note: string | null;
-        created_at: string;
-      }[];
-    }>(`/api/admin/versions?funnelKey=${encodeURIComponent(funnelKey)}`),
+    request<{ funnelKey: string; versions: VersionSummary[]; activations: ActivationRow[] }>(
+      `/api/admin/versions?funnelKey=${encodeURIComponent(funnelKey)}`,
+    ),
 
   configFiles: () =>
     request<{
@@ -112,5 +77,5 @@ export const api = {
   rollback: (funnelKey: string) => post<VersionSummary>('/api/admin/rollback', { funnelKey }),
 
   analytics: (params: Record<string, string>) =>
-    request<any>(`/api/analytics?${new URLSearchParams(params).toString()}`),
+    request<AnalyticsReport>(`/api/analytics?${new URLSearchParams(params).toString()}`),
 };

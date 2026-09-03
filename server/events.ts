@@ -1,15 +1,12 @@
 /**
- * Event ingest.
+ * Приём событий.
  *
- * Four properties the endpoint guarantees, in the order the brief lists them:
- *  1. Re-sending the same event_id never creates a duplicate (PK + INSERT OR IGNORE).
- *  2. Events arrive in batches.
- *  3. Re-sending an entire batch after a timeout is safe — it is just (1) N times.
- *  4. One malformed event is rejected on its own; its siblings still land.
+ * Гарантии эндпоинта: повторный `event_id` не создаёт дубль (PK + INSERT OR IGNORE),
+ * события идут батчами, повтор всего батча безопасен, а одно битое событие
+ * отклоняется отдельно и не роняет соседей.
  *
- * Ingest deliberately does not care about ordering. Nothing downstream reads
- * these rows as a sequence, so a late or out-of-order event is not a special
- * case — it is simply a row that arrives later.
+ * Порядок событий здесь не важен: ниже по потоку строки никогда не читаются как
+ * последовательность, поэтому опоздавшее событие — это просто строка, пришедшая позже.
  */
 import { getDb, nowIso } from './db.ts';
 import { getSession } from './sessions.ts';
@@ -24,7 +21,7 @@ export interface IncomingEvent {
   client_ts?: unknown;
   client_seq?: unknown;
   props?: unknown;
-  /** UTM may be echoed by the client; the session row is the source of truth. */
+  /** Клиент может продублировать UTM, но источник истины — строка сессии. */
   utm?: Record<string, unknown>;
 }
 
@@ -46,7 +43,7 @@ export interface IngestSummary {
 
 const UUID_ISH = /^[A-Za-z0-9_:.-]{8,128}$/;
 
-/** Declared-event lookup, memoised per version (config rows are immutable). */
+/** Объявленные события кэшируются по версии: строки конфигов неизменяемы. */
 const allowedCache = new Map<number, Set<string>>();
 
 function allowedForVersion(versionId: number): Set<string> {
@@ -58,7 +55,7 @@ function allowedForVersion(versionId: number): Set<string> {
   return names;
 }
 
-/** Test helper: the cache outlives an in-memory database swap otherwise. */
+/** Для тестов: иначе кэш переживает подмену in-memory базы. */
 export function resetEventCaches(): void {
   allowedCache.clear();
 }
@@ -81,15 +78,11 @@ function recordRejection(eventId: string | null, reason: string, payload: unknow
       )
       .run(eventId, reason, JSON.stringify(payload ?? null).slice(0, 4000), nowIso());
   } catch {
-    // Never let the debug trail break ingest.
+    // Журнал для разбора не должен ломать приём событий.
   }
 }
 
-/**
- * Ingest one batch. Always returns a per-event verdict; a rejected event never
- * aborts the batch, and the HTTP layer still answers 200 so a retrying client
- * does not spin on a permanently-bad payload.
- */
+/** Обрабатывает батч и возвращает вердикт по каждому событию; отказ одного не прерывает остальные. */
 export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
   const db = getDb();
   const results: EventResult[] = [];
@@ -134,8 +127,7 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
         continue;
       }
 
-      // The version a session is pinned to declares which events it may emit,
-      // so a new config version can introduce an event with no code change.
+      // Версия, к которой привязана сессия, определяет допустимые события: новое событие вводится конфигом.
       if (!allowedForVersion(session.version_id).has(type)) {
         results.push({
           event_id: eventId,
@@ -153,9 +145,8 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
       const props = isPlainObject(raw.props) ? raw.props : {};
       const clientSeq = Number.isFinite(raw.client_seq) ? Number(raw.client_seq) : null;
 
-      // Version, variant and UTM are taken from the pinned session row, never
-      // from the client payload — a tampered or stale client cannot mislabel
-      // its own events.
+      // Версия, вариант и UTM берутся из строки сессии, а не из тела запроса:
+      // подделанный или устаревший клиент не может переразметить свои события.
       const info = insert.run(
         eventId,
         session.session_id,
@@ -201,7 +192,7 @@ export function ingestEvents(batch: IncomingEvent[]): IngestSummary {
   return summary;
 }
 
-/** Running tallies so the dashboard can evidence that retries really happened. */
+/** Счётчики, чтобы на дашборде было видно: повторы и отказы действительно были. */
 function bumpCounters(summary: IngestSummary): void {
   const stmt = getDb().prepare(
     `INSERT INTO ingest_counters (key, value) VALUES (?, ?)
@@ -213,7 +204,7 @@ function bumpCounters(summary: IngestSummary): void {
     stmt.run('duplicates', summary.duplicates);
     stmt.run('rejected', summary.rejected);
   } catch {
-    // Counters are diagnostics; never fail ingest over them.
+    // Счётчики — диагностика; из-за них приём падать не должен.
   }
 }
 

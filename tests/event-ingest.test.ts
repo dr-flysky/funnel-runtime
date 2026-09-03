@@ -1,7 +1,4 @@
-/**
- * Requirement 7.1: "дедупликация событий", plus the section 4.2 invariants —
- * batching, safe retry after timeout, and one bad event not poisoning a batch.
- */
+/** Дедупликация событий: батчи, безопасный ретрай после таймаута и битое событие, не портящее батч. */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FUNNEL, makeEvent, publishV2, seedV1, startServer, useFreshDb, type TestServer } from './helpers.ts';
 import { createSession } from '../server/sessions.ts';
@@ -136,7 +133,7 @@ describe('event ingest', () => {
   });
 
   it('accepts an event a newer config version introduces, with no schema change', () => {
-    // v2 declares `help_opened` in events.allowed. No migration, no server edit.
+    // v2 объявляет `help_opened` в events.allowed — без миграции и правок сервера.
     publishV2();
     const session = createSession({ funnelKey: FUNNEL });
     expect(session.version).toBe(2);

@@ -1,8 +1,4 @@
-/**
- * Publish the supplied config so a fresh clone has something to run.
- * Re-running appends a new version rather than failing, which is also a cheap
- * way to exercise publish/rollback by hand.
- */
+/** Публикует конфиги, чтобы свежий клон было что запустить; повторный запуск добавляет новую версию. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDb } from '../server/db.ts';

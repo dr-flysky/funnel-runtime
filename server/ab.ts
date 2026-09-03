@@ -1,16 +1,12 @@
 /**
- * A/B assignment.
+ * Назначение A/B-варианта.
  *
- * Two independent guarantees of stability:
- *  1. Assignment is a pure function of (sessionId, experimentKey) — the same
- *     inputs always produce the same bucket, on any machine, with no state.
- *  2. The result is persisted on the session row at creation time and read
- *     back from there afterwards. Refresh, resume and a later config change
- *     can never move a session between variants.
+ * Стабильность держится на двух независимых гарантиях: назначение — чистая функция
+ * от (sessionId, experimentId), а результат ещё и записан в строку сессии при её создании.
  */
 import type { FunnelConfig } from '@shared/funnel';
 
-/** FNV-1a, 32-bit. Small, fast, well-distributed for short keys. */
+/** FNV-1a, 32 бита: компактно, быстро и хорошо распределено на коротких ключах. */
 export function hash32(input: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i += 1) {
@@ -25,11 +21,7 @@ export interface Assignment {
   source: 'assigned' | 'override';
 }
 
-/**
- * Pick a variant for a session. `override` (from a query parameter) wins when
- * it names a variant the config actually defines — that is the documented
- * testing hatch, and it is recorded as such so analytics can exclude it.
- */
+/** `override` из query-параметра выигрывает, если такой вариант есть в конфиге, и помечается для аналитики. */
 export function assignVariant(
   config: FunnelConfig,
   sessionId: string,
@@ -47,7 +39,7 @@ export function assignVariant(
   const total = weights.reduce((a, b) => a + b, 0);
   if (total <= 0) return { variant: keys[0], source: 'assigned' };
 
-  // 10_000 buckets keeps weighting precise to a basis point.
+  // 10 000 корзин дают точность весов до одной сотой процента.
   const bucket = hash32(`${config.experiment.id}:${sessionId}`) % 10_000;
   const target = (bucket / 10_000) * total;
 

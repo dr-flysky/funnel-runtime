@@ -1,7 +1,4 @@
-/**
- * HTTP surface. Exported as a factory so tests can mount it against an
- * isolated database without binding a port.
- */
+/** HTTP-слой. Вынесен в фабрику, чтобы тесты монтировали его на изолированную БД без занятия порта. */
 import express, { type NextFunction, type Request, type Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,24 +34,14 @@ function asString(v: unknown): string | null {
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
 }
 
-/**
- * Map a session-write refusal onto a status code.
- *
- * "Gone" and "never existed" are the two cases the client can recover from by
- * starting a fresh session, so they get their own codes. Everything else is a
- * 400 the user can fix in place — a failed validation rule, a stale step id.
- */
+/** «Исчезла» и «не существовала» получают свои коды: из них клиент выходит новой сессией. Остальное — 400. */
 function statusFor(error: string | undefined): number {
   if (error === 'Unknown session.') return 404;
   if (error === 'Session expired.') return 410;
   return 400;
 }
 
-/**
- * Admin guard. Open by default so the deployed URL can be reviewed without
- * credentials; set ADMIN_TOKEN to require `x-admin-token` (or HTTP basic auth
- * with any username) on every mutating admin route.
- */
+/** По умолчанию админка открыта, чтобы демо можно было смотреть без пароля; ADMIN_TOKEN включает защиту. */
 function adminGuard(req: Request, res: Response, next: NextFunction): void {
   const expected = process.env.ADMIN_TOKEN;
   if (!expected) return next();
@@ -78,9 +65,7 @@ export function createApp(): express.Express {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  // -------------------------------------------------------------------------
-  // Runtime — the funnel itself
-  // -------------------------------------------------------------------------
+  // --- Рантайм воронки -----------------------------------------------------
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, funnels: listFunnelKeys() });
@@ -100,7 +85,7 @@ export function createApp(): express.Express {
     });
   });
 
-  /** Start a session. Pins the active version and an A/B variant to it. */
+  /** Старт сессии: фиксирует за ней активную версию и вариант A/B. */
   app.post('/api/session', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const funnelKey = asString(body.funnelKey) ?? DEFAULT_FUNNEL;
@@ -108,7 +93,7 @@ export function createApp(): express.Express {
     const utm = pickUtm(body.utm as Record<string, unknown> | undefined);
 
     try {
-      // `synthetic` marks generator traffic so the dashboard can exclude it.
+      // `synthetic` помечает трафик генератора, чтобы дашборд мог его исключить.
       const view = createSession({
         funnelKey,
         utm,
@@ -126,11 +111,9 @@ export function createApp(): express.Express {
   });
 
   /**
-   * Resume. This is what makes refresh and reopening the page lossless.
-   *
-   * A session past its TTL answers 410 rather than 200: every write route
-   * already refuses it, so serving a renderable view would hand the client a
-   * funnel that dies on the next Continue. 410 is the signal to start fresh.
+   * Возобновление сессии — то, что делает обновление страницы безболезненным.
+   * Протухшая сессия отвечает 410, а не 200: запись в неё всё равно запрещена,
+   * поэтому отдать пригодный для отрисовки экран значило бы обмануть клиента.
    */
   app.get('/api/session/:id', (req, res) => {
     const session = getSession(req.params.id);
@@ -174,14 +157,11 @@ export function createApp(): express.Express {
     res.json(result.view);
   });
 
-  // -------------------------------------------------------------------------
-  // Events
-  // -------------------------------------------------------------------------
+  // --- События -------------------------------------------------------------
 
   /**
-   * Batch ingest. Always 200 when the envelope parses: per-event verdicts are
-   * in the body, so a retrying client can tell a duplicate from a rejection
-   * without inspecting status codes.
+   * Приём батча. Если конверт разобран — всегда 200: вердикты по каждому событию
+   * лежат в теле, поэтому ретрай отличает дубль от отказа без разбора кодов.
    */
   app.post('/api/events', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -197,9 +177,7 @@ export function createApp(): express.Express {
     res.json(ingestEvents(raw as IncomingEvent[]));
   });
 
-  // -------------------------------------------------------------------------
-  // Admin — versions
-  // -------------------------------------------------------------------------
+  // --- Админка: версии -----------------------------------------------------
 
   app.get('/api/admin/versions', (req, res) => {
     const funnelKey = asString(req.query.funnelKey) ?? DEFAULT_FUNNEL;
@@ -210,7 +188,7 @@ export function createApp(): express.Express {
     });
   });
 
-  /** Publish a new version. Rejected configs never become active. */
+  /** Публикация новой версии; отклонённый конфиг активным не становится. */
   app.post('/api/admin/versions', adminGuard, (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const config = body.config as FunnelConfig | undefined;
@@ -258,7 +236,7 @@ export function createApp(): express.Express {
     }
   });
 
-  /** Config files shipped in the repo, offered as one-click publish sources. */
+  /** Конфиги из репозитория, предлагаемые админке для публикации в один клик. */
   app.get('/api/admin/config-files', (_req, res) => {
     const dir = path.resolve(process.cwd(), 'configs');
     if (!fs.existsSync(dir)) {
@@ -288,6 +266,7 @@ export function createApp(): express.Express {
   app.post('/api/admin/publish-file', adminGuard, (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const file = asString(body.file);
+    // Только голое имя файла: защита от обхода каталога configs/.
     if (!file || file.includes('..') || file.includes('/') || file.includes('\\')) {
       res.status(400).json({ error: 'file must be a bare filename inside configs/.' });
       return;
@@ -309,27 +288,24 @@ export function createApp(): express.Express {
     }
   });
 
-  // -------------------------------------------------------------------------
-  // Analytics
-  // -------------------------------------------------------------------------
+  // --- Аналитика -----------------------------------------------------------
 
   app.get('/api/analytics', (req, res) => {
     const funnelKey = asString(req.query.funnelKey) ?? DEFAULT_FUNNEL;
     const versionRaw = asString(req.query.version);
-    const report = buildReport({
-      funnelKey,
-      version: versionRaw ? Number(versionRaw) : null,
-      variant: asString(req.query.variant),
-      campaign: asString(req.query.campaign),
-      includeSynthetic: req.query.includeSynthetic !== 'false',
-      includeOverrides: req.query.includeOverrides === 'true',
-    });
-    res.json(report);
+    res.json(
+      buildReport({
+        funnelKey,
+        version: versionRaw ? Number(versionRaw) : null,
+        variant: asString(req.query.variant),
+        campaign: asString(req.query.campaign),
+        includeSynthetic: req.query.includeSynthetic !== 'false',
+        includeOverrides: req.query.includeOverrides === 'true',
+      }),
+    );
   });
 
-  // -------------------------------------------------------------------------
-  // Static client (production) + SPA fallback
-  // -------------------------------------------------------------------------
+  // --- Статика клиента и SPA-fallback --------------------------------------
 
   const clientDir = path.resolve(process.cwd(), 'dist', 'client');
   if (fs.existsSync(clientDir)) {
@@ -339,7 +315,6 @@ export function createApp(): express.Express {
     });
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error('[api] unhandled error:', err);
     res.status(500).json({ error: 'Internal error.' });
