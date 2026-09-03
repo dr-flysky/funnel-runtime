@@ -315,9 +315,36 @@ describe('analytics aggregation', () => {
     ingestEvents(events);
 
     const report = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
-    expect(report.dataQuality.distinctSessions).toBe(1);
-    expect(report.dataQuality.totalEvents).toBe(3);
-    expect(report.dataQuality.duplicatesSuppressed).toBe(3);
-    expect(report.dataQuality.repeatStepViews).toBe(1);
+    expect(report.dataQuality.scoped.distinctSessions).toBe(1);
+    expect(report.dataQuality.scoped.totalEvents).toBe(3);
+    expect(report.dataQuality.scoped.repeatStepViews).toBe(1);
+    expect(report.dataQuality.allTime.duplicatesSuppressed).toBe(3);
+  });
+
+  /**
+   * The split exists because these two groups behave differently under a
+   * filter. Asserting that keeps anyone from "tidying" them back together.
+   */
+  it('narrows scoped counters under a filter but not the all-time ones', () => {
+    const kept = newSession('A', 'keep');
+    const other = newSession('A', 'drop');
+    const events = [
+      makeEvent(kept.sessionId, 'session_started'),
+      makeEvent(other.sessionId, 'session_started'),
+    ];
+    ingestEvents(events);
+    ingestEvents(events); // duplicates, suppressed at write time
+
+    const all = buildReport({ funnelKey: FUNNEL, includeOverrides: true });
+    const one = buildReport({ funnelKey: FUNNEL, campaign: 'keep', includeOverrides: true });
+
+    expect(one.dataQuality.scoped.distinctSessions).toBeLessThan(
+      all.dataQuality.scoped.distinctSessions,
+    );
+    // A suppressed duplicate never became a row, so it cannot be attributed to
+    // a campaign — the all-time tally is identical under both.
+    expect(one.dataQuality.allTime.duplicatesSuppressed).toBe(
+      all.dataQuality.allTime.duplicatesSuppressed,
+    );
   });
 });

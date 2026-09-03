@@ -1,0 +1,43 @@
+# Keep the build context to what the image actually needs.
+#
+# The Dockerfile runs `npm ci` and *then* `COPY . .`, so without this file a
+# local `docker build` copies the host's node_modules over the container's.
+# esbuild and rollup ship platform-specific binaries (@esbuild/win32-x64,
+# @rollup/rollup-win32-x64-*), so a Windows or macOS host silently replaces the
+# Linux ones and `npm run build` fails inside the image.
+#
+# It also keeps the local SQLite database out: the image must boot with an empty
+# volume so scripts/seed-if-empty.ts publishes on first run, rather than
+# shipping whatever happened to be in data/ on someone's laptop.
+#
+# Deliberately conservative — everything the build or the runtime touches stays.
+# configs/ is required at runtime (seeding and the admin publish page), and
+# scripts/ holds the first-boot seed the CMD invokes.
+
+node_modules
+**/node_modules
+
+# Rebuilt inside the image by `npm run build`.
+dist
+
+# Local database; the deployed one lives on the mounted volume at /data.
+data
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+.git
+.gitignore
+.gitattributes
+.github
+
+.env
+.env.*
+.DS_Store
+
+# Not part of the running service.
+Dockerfile
+.dockerignore
+deploy
+*.pdf

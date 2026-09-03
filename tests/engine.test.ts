@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig, makeV2 } from './helpers.ts';
 import {
+  CORE_EVENT_TYPES,
   computeProgress,
   configErrors,
   firstStepId,
@@ -365,5 +366,26 @@ describe('a v2-shaped config', () => {
     const path = walk(B, { work_mode: 'remote', async_maturity: 'low' });
     expect(path).not.toContain('tool_count');
     expect(path[path.length - 1]).toBe('result');
+  });
+
+  /**
+   * The client renders the help affordance only for versions whose config
+   * declares `help_opened`, so the declared list has to survive resolution and
+   * reach the browser. Without this, a new event is acceptable at ingest but
+   * nothing in the UI can produce it.
+   */
+  it('carries the declared event names through to the resolved funnel', () => {
+    const v1Resolved = resolveVariant(v1, 'A');
+    const v2Resolved = resolveVariant(v2, 'A');
+
+    // Core events are always declared, whatever the config says.
+    for (const core of CORE_EVENT_TYPES) {
+      expect(v1Resolved.allowedEvents).toContain(core);
+      expect(v2Resolved.allowedEvents).toContain(core);
+    }
+
+    // The new one is version-specific: v2 has it, v1 does not.
+    expect(v2Resolved.allowedEvents).toContain('help_opened');
+    expect(v1Resolved.allowedEvents).not.toContain('help_opened');
   });
 });

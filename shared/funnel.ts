@@ -190,6 +190,13 @@ export interface ResolvedFunnel {
   defaultResultId: string;
   progress: ProgressPolicy;
   session: SessionPolicy;
+  /**
+   * Event names this version declares. The client renders an affordance only
+   * when the config asks for its event, so a config can introduce one — and the
+   * UI that produces it — without a client release. Ingest checks the same list
+   * server-side, so this is a hint, not a permission.
+   */
+  allowedEvents: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +301,7 @@ export function resolveVariant(config: FunnelConfig, variant: string): ResolvedF
     defaultResultId: config.defaultResultId,
     progress: config.progress ?? {},
     session: config.session ?? {},
+    allowedEvents: [...allowedEventNames(config)],
   };
 }
 

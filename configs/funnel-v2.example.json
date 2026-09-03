@@ -277,7 +277,8 @@
       "type": "single-select",
       "content": {
         "title": "How are decisions documented today?",
-        "helperText": "Choose what happens most often."
+        "helperText": "Choose what happens most often.",
+        "body": "\"Written down by default\" means someone outside the meeting could reconstruct the decision and its reasoning a month later without asking anyone."
       },
       "input": {
         "name": "async_maturity",
@@ -340,7 +341,8 @@
       "id": "meeting_load",
       "type": "number",
       "content": {
-        "title": "How many hours a week go to meetings?"
+        "title": "How many hours a week go to meetings?",
+        "body": "Count recurring meetings a typical person on the team attends — standups, planning, reviews and one-to-ones. Leave out ad-hoc calls and anything only managers sit in."
       },
       "input": {
         "name": "meeting_load",

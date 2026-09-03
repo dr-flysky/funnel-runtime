@@ -9,8 +9,10 @@ import { ingestEvents, type IncomingEvent } from './events.ts';
 import {
   buildView,
   createSession,
+  funnelForSession,
   getSession,
   goBack,
+  isExpired,
   NoActiveVersionError,
   pickUtm,
   submitAnswer,
@@ -33,6 +35,19 @@ const DEFAULT_FUNNEL = process.env.DEFAULT_FUNNEL_KEY ?? 'workstyle-planner';
 
 function asString(v: unknown): string | null {
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+}
+
+/**
+ * Map a session-write refusal onto a status code.
+ *
+ * "Gone" and "never existed" are the two cases the client can recover from by
+ * starting a fresh session, so they get their own codes. Everything else is a
+ * 400 the user can fix in place — a failed validation rule, a stale step id.
+ */
+function statusFor(error: string | undefined): number {
+  if (error === 'Unknown session.') return 404;
+  if (error === 'Session expired.') return 410;
+  return 400;
 }
 
 /**
@@ -110,11 +125,21 @@ export function createApp(): express.Express {
     }
   });
 
-  /** Resume. This is what makes refresh and reopening the page lossless. */
+  /**
+   * Resume. This is what makes refresh and reopening the page lossless.
+   *
+   * A session past its TTL answers 410 rather than 200: every write route
+   * already refuses it, so serving a renderable view would hand the client a
+   * funnel that dies on the next Continue. 410 is the signal to start fresh.
+   */
   app.get('/api/session/:id', (req, res) => {
     const session = getSession(req.params.id);
     if (!session) {
       res.status(404).json({ error: 'Unknown session.' });
+      return;
+    }
+    if (isExpired(session, funnelForSession(session))) {
+      res.status(410).json({ error: 'Session expired.' });
       return;
     }
     res.json(buildView(session));
@@ -130,7 +155,7 @@ export function createApp(): express.Express {
 
     const result = submitAnswer(req.params.id, stepId, body.value);
     if (!result.ok) {
-      res.status(result.error === 'Unknown session.' ? 404 : 400).json({ error: result.error });
+      res.status(statusFor(result.error)).json({ error: result.error });
       return;
     }
     res.json({
@@ -143,7 +168,7 @@ export function createApp(): express.Express {
   app.post('/api/session/:id/back', (req, res) => {
     const result = goBack(req.params.id);
     if (!result.ok) {
-      res.status(result.error === 'Unknown session.' ? 404 : 400).json({ error: result.error });
+      res.status(statusFor(result.error)).json({ error: result.error });
       return;
     }
     res.json(result.view);

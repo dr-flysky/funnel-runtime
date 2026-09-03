@@ -1,4 +1,4 @@
-/** Publish a config file as a new active version: npm run publish:v2 */
+/** Publish a config file as a new active version: npm run publish -- <file> */
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDb } from '../server/db.ts';

@@ -43,7 +43,7 @@ npm run generate:traffic -- 300 --seed=7
 ### Other commands
 
 ```bash
-npm test              # 80 tests
+npm test              # 91 tests
 npm run typecheck
 npm run build         # bundle the client into dist/client
 npm start             # single process serving API + built client on :3000
@@ -173,6 +173,7 @@ Per-event properties, exactly as declared:
 | `back_clicked` | `destination_step_id` |
 | `result_viewed` | `result_id` |
 | `cta_clicked` | `result_id`, `action` |
+| `help_opened` | `surface` — declared by v2 only, not by the shipped v1 |
 
 **The CTA performs its declared action.** Every result in the supplied config
 names `expand_recommendation`, so the recommendation list is *withheld* until
@@ -181,6 +182,14 @@ rather than a decorative click, and what the primary metric is measuring. An
 action the client does not implement still records the click and falls back to
 revealing the recommendation, and `validateConfig` warns at publish time so a
 dead button cannot ship unnoticed.
+
+**Inline help is config-driven on two independent switches.** A question showing
+`content.body` gets a "What does this mean?" toggle; the toggle emits
+`help_opened` only when the session's own version declares that event. So a
+config can add help copy without inventing an event, or declare the event and
+start measuring, and neither needs a client release. The resolved funnel carries
+`allowedEvents` for exactly this. The supplied v1 config has no help copy on any
+question and does not declare the event, so nothing changes for it.
 
 `funnel_version`, `variant`, `experiment_id` and the UTM tags are taken from the
 **session row**, never from the request body, so a stale or tampered client
@@ -245,10 +254,13 @@ Segments re-run the same query with an extra filter, so `byVariant` and
 `?variant=` test hatch are **excluded by default**; pass `includeOverrides=true`
 to see them.
 
-The dashboard's **Data quality** panel reports duplicates suppressed, events that
-arrived out of order (client sequence disagreeing with arrival order) and repeat
-step views — evidence that the messy cases happened and were handled, not that
-they were absent.
+The dashboard's **Data quality** panel splits into two groups, because they
+behave differently under a filter. *Current selection* — total events, distinct
+sessions, out-of-order arrivals and repeat step views — narrows with the
+campaign and version filters like every other metric. *All ingest* — duplicates
+suppressed and events rejected — cannot: neither ever became a row, so there is
+nothing left to attribute to a campaign or a version. The panel labels them
+rather than showing them beside filtered numbers as if they narrowed too.
 
 ---
 
@@ -309,7 +321,8 @@ that exercises exactly the three changes iteration 2 specifies:
   `async_maturity` is `low` or `medium`
 - **a step removed for one variant** — variant B drops `tool_count` by omitting
   it from its `stepSequence`
-- **a new event** — `help_opened`, declared in `events.allowed`
+- **a new event** — `help_opened`, declared in `events.allowed`, with help copy
+  added to two steps so the client renders the affordance that produces it
 
 ```bash
 npm run publish -- configs/funnel-v2.example.json
@@ -323,7 +336,7 @@ Verified by hand and by `tests/version-pinning.test.ts`:
 | Sessions started before the publish | keep running on v1, including their config, and still advance |
 | New sessions | start on v2 and see the new branch |
 | Variant B on v2 | never sees `tool_count`; omission from a linear sequence cannot strand anyone |
-| `help_opened` | accepted on v2, rejected on v1, with no migration |
+| `help_opened` | emitted by the client and the generator on v2; accepted on v2, rejected on v1, with no migration |
 | After rollback | new sessions get v1; v2 sessions stay on v2; **both versions' analytics remain** and are comparable |
 
 Swapping in the real file should need no code change. Anything it exercises that
@@ -347,6 +360,7 @@ npm test    # 80 tests, ~1.5s
 | `event-ingest.test.ts` | dedup, batching, timeout replay, partial failure, session-sourced labels, version-scoped event names |
 | `publish-rollback.test.ts` | publish, activate, roll back, audit trail, invalid configs refused |
 | `analytics.test.ts` | hand-countable scenarios for every metric under duplicates, Back and out-of-order arrival |
+| `session-expiry.test.ts` | an expired session is refused by every route, not served as a view that cannot be submitted |
 
 The analytics tests deliberately build tiny scenarios where the right answer is
 obvious by inspection — three sessions see a step, one gets past it, so drop-off
@@ -384,6 +398,29 @@ docker build -t funnel-runtime .
 docker run -p 3000:3000 -v funnel-data:/data funnel-runtime
 ```
 
+The `.dockerignore` is load-bearing, not tidiness. The Dockerfile runs `npm ci`
+and then `COPY . .`, so without it a local build copies the host's
+`node_modules` over the container's — esbuild and rollup ship per-platform
+binaries, so a Windows or macOS host replaces the Linux ones and the in-image
+`npm run build` fails. It also keeps the local SQLite file out, so the image
+always boots against an empty volume and seeds itself.
+
+**Render** — `deploy/render.yaml` is a blueprint: point Render at the repo and
+it provisions the web service and the 1GB disk at `/data`.
+
+**Fly** — the volume must exist before the first deploy, and the blueprint's
+`dockerfilePath` is relative to `deploy/`, so deploy with the config explicitly:
+
+```bash
+fly volumes create funnel_data --size 1
+fly deploy -c deploy/fly.toml --dockerfile Dockerfile
+```
+
+After the first boot, check `/api/health` (it lists the published funnels),
+then `/` for the funnel, `/admin` for versions and `/dashboard` for analytics.
+Run `npm run generate:traffic` against the deployed `DB_FILE` — or just walk the
+funnel a few times — so the dashboard has something to show.
+
 Set `ADMIN_TOKEN` to require `x-admin-token` (or HTTP basic auth) on the mutating
 admin routes. Unset, they are open — see the assumptions below.
 
@@ -393,9 +430,10 @@ admin routes. Unset, they are open — see the assumptions below.
 
 **Confirmed with the client:**
 
-1. **"No third-party services" does not ban hosting platforms** — confirmed, so
-   Vercel / Render / Fly are in scope. The event pipeline, experiment assignment
-   and storage are all built here regardless.
+1. **"No third-party services" does not ban hosting platforms** — asked and
+   answered *yes*, so Render / Fly / Vercel are in scope for hosting. Nothing
+   else is outsourced: the event pipeline, experiment assignment, storage and
+   analytics are all built in this repo and run in this process.
 
 **Assumptions where the brief is still silent:**
 
@@ -410,6 +448,12 @@ admin routes. Unset, they are open — see the assumptions below.
 4. **Session state is server-side, keyed by a session id in `localStorage`.**
    Refresh and reopening the tab resume perfectly; a different browser or device
    does not, since there is no account to tie sessions together.
+   A session past the config's `session.ttlHours` (72) is **gone, not
+   resumable**: every route answers `410`, and the client drops the stored id
+   and starts a fresh session with a short explanation rather than rendering a
+   funnel that cannot be submitted. Answers from the expired session are not
+   carried over — they were validated against a config the new session may not
+   even be running.
 5. **Admin and dashboard routes are unauthenticated by default** so the deployed
    URL can be reviewed without credentials. `ADMIN_TOKEN` gates the mutating
    routes when set. Not a production posture.

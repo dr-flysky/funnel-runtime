@@ -181,6 +181,7 @@ interface Stats {
   completed: number;
   ctaClicks: number;
   backs: number;
+  helpOpens: number;
   dropOffs: Record<string, number>;
   variants: Record<string, number>;
   stepHits: Record<string, number>;
@@ -236,6 +237,14 @@ async function runSession(base: string, stats: Stats, allEvents: QueuedEvent[][]
       visible_step_index: view.progress.visibleIndex,
       visible_step_count: view.progress.visibleCount,
     });
+
+    // Inline help, on the same two conditions the client applies: the step
+    // supplies help copy, and this session's version declares the event. On a
+    // version that declares neither, nothing here fires.
+    if (step.content?.body && funnel.allowedEvents?.includes('help_opened') && chance(0.2)) {
+      stats.helpOpens += 1;
+      buf.emit('help_opened', step.id, { surface: 'inline' });
+    }
 
     if (chance(dropOffProbability(step, guard))) {
       stats.dropOffs[step.id] = (stats.dropOffs[step.id] ?? 0) + 1;
@@ -370,7 +379,7 @@ async function main(): Promise<void> {
   );
 
   const stats: Stats = {
-    sessions: 0, completed: 0, ctaClicks: 0, backs: 0,
+    sessions: 0, completed: 0, ctaClicks: 0, backs: 0, helpOpens: 0,
     dropOffs: {}, variants: {}, stepHits: {}, results: {},
   };
   const perSession: QueuedEvent[][] = [];
@@ -393,6 +402,7 @@ async function main(): Promise<void> {
   console.log(`  reached result    ${stats.completed}`);
   console.log(`  clicked CTA       ${stats.ctaClicks}`);
   console.log(`  pressed Back      ${stats.backs}`);
+  console.log(`  opened help       ${stats.helpOpens}  (only on versions declaring help_opened)`);
   console.log(`results             ${fmt(stats.results)}`);
   console.log(`steps entered       ${fmt(stats.stepHits)}`);
   console.log(`drop-off by step    ${fmt(stats.dropOffs)}`);

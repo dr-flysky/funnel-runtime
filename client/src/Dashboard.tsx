@@ -35,7 +35,10 @@ interface Report {
   byVariant: Segment[];
   byVersion: Segment[];
   customEvents: { type: string; events: number; sessions: number }[];
-  dataQuality: Record<string, number>;
+  dataQuality: {
+    scoped: Record<string, number>;
+    allTime: Record<string, number>;
+  };
   campaigns: string[];
   versions: number[];
   variants: string[];
@@ -327,8 +330,24 @@ export default function Dashboard({ funnelKey }: { funnelKey: string }) {
           Evidence that the messy cases actually occurred and were handled, rather than never
           arriving.
         </p>
+
+        <h3 className="quality-head">Current selection</h3>
         <div className="quality">
-          {Object.entries(report.dataQuality).map(([k, v]) => (
+          {Object.entries(report.dataQuality.scoped).map(([k, v]) => (
+            <div key={k} className="quality-item">
+              <span className="quality-value">{v}</span>
+              <span className="quality-label">{k.replace(/([A-Z])/g, ' $1').toLowerCase()}</span>
+            </div>
+          ))}
+        </div>
+
+        <h3 className="quality-head">All ingest, every funnel</h3>
+        <p className="muted small">
+          These two cannot narrow with the filters above: a suppressed duplicate and a rejected
+          event never became rows, so there is nothing left to attribute to a campaign or version.
+        </p>
+        <div className="quality">
+          {Object.entries(report.dataQuality.allTime).map(([k, v]) => (
             <div key={k} className="quality-item">
               <span className="quality-value">{v}</span>
               <span className="quality-label">{k.replace(/([A-Z])/g, ' $1').toLowerCase()}</span>

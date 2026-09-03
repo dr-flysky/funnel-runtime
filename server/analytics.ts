@@ -74,16 +74,29 @@ export interface CustomEventMetric {
   sessions: number;
 }
 
+/**
+ * Two groups, and the split is not cosmetic.
+ *
+ * `scoped` re-runs under the current filters like every other metric.
+ * `allTime` cannot: a suppressed duplicate and a rejected event never became
+ * rows, so there is nothing left to attribute to a campaign or a version. They
+ * are ingest-wide tallies, and the dashboard labels them as such rather than
+ * showing them beside filtered numbers as if they narrowed too.
+ */
 export interface DataQuality {
-  totalEvents: number;
-  distinctSessions: number;
-  /** Events whose arrival order disagrees with the client's own sequence number. */
-  outOfOrderEvents: number;
-  /** Duplicate submissions suppressed at write time, all-time. */
-  duplicatesSuppressed: number;
-  rejectedEvents: number;
-  /** step_viewed events beyond the first per (session, step). */
-  repeatStepViews: number;
+  scoped: {
+    totalEvents: number;
+    distinctSessions: number;
+    /** Events whose arrival order disagrees with the client's own sequence number. */
+    outOfOrderEvents: number;
+    /** step_viewed events beyond the first per (session, step). */
+    repeatStepViews: number;
+  };
+  allTime: {
+    /** Duplicate submissions suppressed at write time. */
+    duplicatesSuppressed: number;
+    rejectedEvents: number;
+  };
 }
 
 export interface AnalyticsReport {
@@ -347,12 +360,16 @@ function dataQuality(f: AnalyticsFilters): DataQuality {
     .get() as { n: number };
 
   return {
-    totalEvents: totals.events,
-    distinctSessions: totals.sessions,
-    outOfOrderEvents: ooo.n,
-    duplicatesSuppressed: suppressed.n,
-    rejectedEvents: rejected.n,
-    repeatStepViews: repeats.n,
+    scoped: {
+      totalEvents: totals.events,
+      distinctSessions: totals.sessions,
+      outOfOrderEvents: ooo.n,
+      repeatStepViews: repeats.n,
+    },
+    allTime: {
+      duplicatesSuppressed: suppressed.n,
+      rejectedEvents: rejected.n,
+    },
   };
 }
 

@@ -24,9 +24,29 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
   const [view, setView] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState<AnswerValue>(null);
   const [busy, setBusy] = useState(false);
   const viewedRef = useRef<string | null>(null);
+
+  /**
+   * A session the server will no longer accept writes for — past its TTL, or
+   * from a wiped database. Both are recoverable in exactly one way: drop the
+   * stored id and start again.
+   */
+  const isGone = (err: unknown): boolean =>
+    err instanceof ApiError && (err.status === 404 || err.status === 410);
+
+  // ---- start a brand-new session ------------------------------------------
+  const startFresh = useCallback(async (): Promise<SessionView> => {
+    localStorage.removeItem(SESSION_KEY(funnelKey));
+    const params = new URLSearchParams(window.location.search);
+    const created = await api.startSession(funnelKey, readUtm(), params.get('variant'));
+    localStorage.setItem(SESSION_KEY(funnelKey), created.sessionId);
+    tracker.track(created.sessionId, 'session_started');
+    viewedRef.current = null;
+    return created;
+  }, [funnelKey]);
 
   // ---- boot: resume the stored session, or start a new one -----------------
   useEffect(() => {
@@ -42,15 +62,14 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
             return;
           } catch (err) {
             // Expired, or a session from a wiped database: start fresh.
-            if (!(err instanceof ApiError) || (err.status !== 404 && err.status !== 410)) throw err;
-            localStorage.removeItem(SESSION_KEY(funnelKey));
+            if (!isGone(err)) throw err;
+            if (!cancelled && err instanceof ApiError && err.status === 410) {
+              setNotice('Your last visit expired, so this is a fresh start.');
+            }
           }
         }
 
-        const params = new URLSearchParams(window.location.search);
-        const created = await api.startSession(funnelKey, readUtm(), params.get('variant'));
-        localStorage.setItem(SESSION_KEY(funnelKey), created.sessionId);
-        tracker.track(created.sessionId, 'session_started');
+        const created = await startFresh();
         if (!cancelled) setView(created);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -60,7 +79,7 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
     return () => {
       cancelled = true;
     };
-  }, [funnelKey]);
+  }, [funnelKey, startFresh]);
 
   // ---- one step_viewed / result_viewed per arrival ------------------------
   useEffect(() => {
@@ -115,12 +134,21 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       });
       setView(next);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 400) setFieldError(err.message);
-      else setError(err instanceof Error ? err.message : String(err));
+      // A tab left open past the TTL: the answer is refused, so rather than
+      // stranding the user on a funnel that can no longer be submitted, start
+      // them over and say why.
+      if (isGone(err)) {
+        setNotice('That session expired while this tab was open, so we started a new one.');
+        setView(await startFresh());
+      } else if (err instanceof ApiError && err.status === 400) {
+        setFieldError(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(false);
     }
-  }, [view, step, draft, busy]);
+  }, [view, step, draft, busy, startFresh]);
 
   const goBack = useCallback(async () => {
     if (!view || busy) return;
@@ -133,23 +161,23 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
       });
       setView(back);
     } catch (err) {
-      if (!(err instanceof ApiError && err.status === 400)) {
+      if (isGone(err)) {
+        setNotice('That session expired while this tab was open, so we started a new one.');
+        setView(await startFresh());
+      } else if (!(err instanceof ApiError && err.status === 400)) {
+        // A 400 here just means "already at the first step" — not worth a message.
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
       setBusy(false);
     }
-  }, [view, busy]);
+  }, [view, busy, startFresh]);
 
   const restart = useCallback(async () => {
-    localStorage.removeItem(SESSION_KEY(funnelKey));
-    const params = new URLSearchParams(window.location.search);
-    const created = await api.startSession(funnelKey, readUtm(), params.get('variant'));
-    localStorage.setItem(SESSION_KEY(funnelKey), created.sessionId);
-    tracker.track(created.sessionId, 'session_started');
-    viewedRef.current = null;
-    setView(created);
-  }, [funnelKey]);
+    setNotice(null);
+    setFieldError(null);
+    setView(await startFresh());
+  }, [startFresh]);
 
   if (error) {
     return (
@@ -187,6 +215,15 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
         {view.utm.utm_campaign && <span className="pill ghost">{view.utm.utm_campaign}</span>}
       </div>
 
+      {notice && (
+        <div className="session-notice" role="status">
+          {notice}
+          <button type="button" className="notice-dismiss" onClick={() => setNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {!done && view.progress.total > 0 && (
         <div
           className="progress"
@@ -212,6 +249,8 @@ export default function Funnel({ funnelKey }: { funnelKey: string }) {
               {step.content.helperText && <p className="subtitle">{step.content.helperText}</p>}
 
               <StepInput step={step} value={draft} onChange={setDraft} onSubmit={submit} />
+
+              <StepHelp key={step.id} step={step} view={view} />
 
               {fieldError && <p className="field-error">{fieldError}</p>}
 
@@ -333,6 +372,44 @@ function ResultScreen({
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * Optional inline help for a question, drawn from the step's own `content.body`
+ * — a field info screens render directly but questions otherwise ignore.
+ *
+ * Two independent switches, deliberately:
+ *   - the *affordance* appears when the step supplies help copy;
+ *   - the *event* fires only when the session's version declares `help_opened`.
+ *
+ * So a config can add help text to a step without inventing an event, or
+ * declare the event and start measuring, and neither needs a client release.
+ * Emitting an undeclared event would be rejected by ingest anyway.
+ */
+function StepHelp({ step, view }: { step: StepDef; view: SessionView }) {
+  const [open, setOpen] = useState(false);
+  const body = step.content.body;
+
+  // Info screens already render `body` as their main copy.
+  if (!body || step.type === 'info') return null;
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    // Declared property for help_opened: surface.
+    if (next && view.funnel.allowedEvents.includes('help_opened')) {
+      tracker.track(view.sessionId, 'help_opened', step.id, { surface: 'inline' });
+    }
+  };
+
+  return (
+    <div className="help">
+      <button type="button" className="link" onClick={toggle} aria-expanded={open}>
+        {open ? 'Hide help' : 'What does this mean?'}
+      </button>
+      {open && <p className="help-body">{body}</p>}
+    </div>
   );
 }
 
