@@ -389,9 +389,11 @@ order, all four recommendations reached.
 
 ## Deployment
 
-`Dockerfile` plus blueprints in `deploy/` for Render and Fly. Both mount a volume
-at `/data` so the SQLite file survives deploys, and `scripts/seed-if-empty.ts`
-publishes on first boot only — a redeploy never resets a live funnel.
+One `Dockerfile`, deployed to Railway. `railway.toml` sits at the repo root;
+`deploy/render.yaml` and `deploy/fly.toml` are kept as working alternatives for
+the same image. All three mount a volume at `/data` so the SQLite file survives
+deploys, and `scripts/seed-if-empty.ts` publishes on first boot only — a
+redeploy never resets a live funnel.
 
 ```bash
 docker build -t funnel-runtime .
@@ -405,21 +407,60 @@ binaries, so a Windows or macOS host replaces the Linux ones and the in-image
 `npm run build` fails. It also keeps the local SQLite file out, so the image
 always boots against an empty volume and seeds itself.
 
-**Render** — `deploy/render.yaml` is a blueprint: point Render at the repo and
-it provisions the web service and the 1GB disk at `/data`.
+**Railway** (the deployed instance) — `railway.toml` at the repo root pins the
+Dockerfile builder and `numReplicas = 1`. Connect the GitHub repo, then:
 
-**Fly** — the volume must exist before the first deploy, and the blueprint's
-`dockerfilePath` is relative to `deploy/`, so deploy with the config explicitly:
+1. **Add a volume** to the service, mounted at `/data`. Do this *before* the
+   first deploy, so the database is never written to the container filesystem.
+2. **Set the variables** — `DB_FILE=/data/funnel.db` and, for the first boot
+   only, `SEED_TRAFFIC=140`. Railway injects `PORT` itself and the server reads
+   it, so leave that alone.
+3. **Generate a domain** under Settings → Networking. Railway does not expose a
+   service publicly until you ask it to, which is the step most easily missed.
+
+`numReplicas = 1` is not a cost setting. The store is a SQLite file on one
+volume; a second replica would open its own copy and split version pinning,
+sessions and analytics across two databases that never reconcile. Same reason
+Fly needs `--ha=false`.
+
+**Render** — `deploy/render.yaml` provisions the web service and a 1GB disk at
+`/data`. Sign in with GitHub; the Docker runtime builds straight from the
+`Dockerfile`.
+
+On the **free tier** there is no persistent disk, so drop the `disk:` block, set
+`plan: free`, and set `SEED_TRAFFIC` — the database is wiped on every spin-down,
+and without it a reviewer arriving after an idle period would find a working
+funnel with an empty dashboard:
+
+```
+SEED_TRAFFIC=140     # first boot republishes v1 and generates this many sessions
+```
+
+`scripts/seed-if-empty.ts` only does this when the database has no versions at
+all, so on a disk-backed plan it runs once and never again — real traffic
+accumulates from then on. Seeding is synchronous, so a cold start costs roughly
+20–60s before the port opens; that is well inside Render's deploy timeout, but
+it is why the value is `0` by default.
+
+**Fly** — the blueprint names `funnel-runtime-drsoft`; Fly app names are
+globally unique, so claim it (or change it) before deploying. The volume must
+exist before the first deploy,
+and `--ha=false` is required: Fly provisions two machines by default and a
+volume attaches to only one, which is also the `numReplicas = 1` argument above.
 
 ```bash
-fly volumes create funnel_data --size 1
-fly deploy -c deploy/fly.toml --dockerfile Dockerfile
+fly apps create funnel-runtime-drsoft       # must match `app` in deploy/fly.toml
+fly volumes create funnel_data --size 1 --region ams
+fly deploy -c deploy/fly.toml --dockerfile Dockerfile --ha=false
 ```
+
+`--dockerfile Dockerfile` is passed explicitly because the blueprint's
+`dockerfilePath` is written relative to `deploy/`.
 
 After the first boot, check `/api/health` (it lists the published funnels),
 then `/` for the funnel, `/admin` for versions and `/dashboard` for analytics.
-Run `npm run generate:traffic` against the deployed `DB_FILE` — or just walk the
-funnel a few times — so the dashboard has something to show.
+If you did not set `SEED_TRAFFIC`, walk the funnel a few times so the dashboard
+has something to show.
 
 Set `ADMIN_TOKEN` to require `x-admin-token` (or HTTP basic auth) on the mutating
 admin routes. Unset, they are open — see the assumptions below.

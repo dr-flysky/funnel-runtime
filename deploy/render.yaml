@@ -1,4 +1,14 @@
-# Render.com blueprint. The disk keeps the SQLite file across deploys.
+# Render.com blueprint.
+#
+# As written this is the paid ("starter") shape: the disk keeps the SQLite file
+# across deploys, so published versions, rollback history and collected
+# analytics all survive a restart. This is the faithful configuration.
+#
+# To run on the FREE tier instead: delete the `disk:` block and change `plan` to
+# `free` — free instances get no persistent disk. The service still works, but
+# the database is empty again after every spin-down, so set SEED_TRAFFIC (below)
+# to have first boot republish v1 *and* generate synthetic traffic. Without it
+# the dashboard would be empty for a reviewer arriving after an idle period.
 services:
   - type: web
     name: funnel-runtime
@@ -10,6 +20,11 @@ services:
         value: 3000
       - key: DB_FILE
         value: /data/funnel.db
+      # Synthetic traffic on first boot only, for hosts with no persistent
+      # disk. Unset or 0 means none. On a disk-backed plan leave it unset:
+      # real traffic accumulates instead.
+      - key: SEED_TRAFFIC
+        value: 0
       # Set ADMIN_TOKEN in the dashboard to gate the version-control routes.
     disk:
       name: funnel-data

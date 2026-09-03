@@ -1,5 +1,5 @@
 # Fly.io. `fly volumes create funnel_data --size 1` before the first deploy.
-app = "funnel-runtime"
+app = "funnel-runtime-drsoft"
 primary_region = "ams"
 
 [build]
